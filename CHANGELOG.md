@@ -6,6 +6,8 @@ Rules and documentation (audit unchanged, version 1.3.1)
 - README: a short section on why the repository is public and what participants get out of it.
 - `RULES.md`: pushed work, forks and draft PRs included, is public right away.
 - `RULES.md`: holes in the audit are reported through GitHub's private vulnerability reporting.
+- `RULES.md`: what the working paper is (a short preprint, not a journal article), where and when it
+  is posted, and that each author approves the final text.
 - `RULES.md` and README: no invitation is needed. Participants fork the repository and open PRs from
   the fork; the README workflow now pushes to the fork.
 

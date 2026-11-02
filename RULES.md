@@ -127,6 +127,11 @@ Dec 7, forward:
 Co-authors are contributors with at least one merged PR (any audit verdict), and a documented contribution
 (feature, infrastructure, strategy or review). It does not depend on the sign of a Sharpe ratio.
 
+The working paper is a short write-up of the sprint, not a journal article: how the audit works, one
+section per track (about a page, written by its contributor from the PR write-up) and the results with
+their intervals. It is posted as a preprint after the Dec 7 report, planned for January 2027, archived
+with a DOI on Zenodo and also on SSRN. Each author approves the final text before it is posted.
+
 ## License
 
 Code contributions are licensed under the MIT License (`LICENSE`). Market data under `data/` is not
