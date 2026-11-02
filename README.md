@@ -96,12 +96,13 @@ Workflow:
 ```bash
 git checkout -b feat/<name>
 python -m src.audit strategies/<name>.py
-git push origin feat/<name>     # open a PR; strategy PRs stay draft until Nov 9
+git remote add fork https://github.com/<you>/open-quant-sprint   # once, after forking on GitHub
+git push fork feat/<name>       # open a PR from your fork; strategy PRs stay draft until Nov 9
 ```
 
-Without write access to this repository, fork it on GitHub and push the branch to your fork instead
-(`git remote add fork https://github.com/<you>/open-quant-sprint`, then `git push fork feat/<name>`),
-and open the PR from there. The first CI run on a PR from a fork waits until the maintainer approves it.
+No invitation or write access is needed: fork the repository on GitHub (the Fork button) and open
+the PR from your fork. Until you have a merged PR, each CI run waits for the maintainer to approve it;
+after that CI starts on its own.
 
 CI runs the test suite and audits every strategy file added, changed or renamed in the PR. Only your files under `strategies/` and `src/contrib/` are taken from the PR; everything else comes from `main`. CI is a convenience: the official verdict is the maintainer's run described in `RULES.md`.
 

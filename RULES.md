@@ -6,7 +6,7 @@ Changes to these rules are listed in `CHANGELOG.md`.
 
 | Date | Event |
 | --- | --- |
-| Nov 2 | Repository access. Activation PRs (features, infrastructure, tests) can be merged. |
+| Nov 2 | The repository opens. No invitation is needed: fork it and open PRs from your fork. Activation PRs (features, infrastructure, tests) can be merged. |
 | Nov 2 - Nov 8 | Strategy PRs may be opened as drafts. They are not merged before Nov 9. |
 | Nov 9 | Official start. Strategy PRs are merged after review once the write-up is in and the causality check passes. Any audit verdict is accepted; a REJECT shows a red CI check and the maintainer merges it by hand. |
 | Nov 21, 23:59 | Code freeze: tag `sprint-01-freeze`, SHA-256 of every strategy file recorded in `benchmarks/freeze.txt`. |
