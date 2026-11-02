@@ -6,6 +6,27 @@ Rules, timeline, verdict criteria: [`RULES.md`](RULES.md). Known gaps: [`LIMITAT
 
 The audit catches common look-ahead mistakes; it is not secure against deliberate cheating, and a PASS is a hygiene check, not evidence of an edge (see [Audit](#audit)).
 
+## Why it is public
+
+Everything here is open: the harness, the data pipeline, every strategy and every audit report. The
+idea is that each participant leaves the sprint with work anyone can check, not a screenshot of a
+backtest.
+
+- Your strategy and features stay yours: your own files, a PR under your name, and the audit
+  scorecard in CI and in the final report.
+- Anyone can clone the repository, rerun your audit and get the same numbers. That is the part worth
+  linking on a CV or walking through in an interview.
+- Contributors with a merged PR are co-authors of the working paper ([`RULES.md`](RULES.md#co-authorship-of-the-working-paper)).
+- The code is MIT, so you can reuse what you wrote here anywhere, and so can everyone else.
+
+Be straight about what a result means. A PASS says the strategy is causal, reproducible and positive
+after costs on this panel; it does not prove an edge. A REJECT with a clear write-up of why the idea
+failed counts just as much, and usually makes for a better conversation.
+
+What you push is public right away: branches, forks and draft PRs alike (GitHub has no private forks
+of a public repository). If you want to keep an idea to yourself for a while, work locally and open
+the PR before the code freeze (Nov 21, 23:59 UTC).
+
 ## Quick start
 
 Requires Python 3.11+. The lock file pins exact versions, so use a fresh virtual environment rather

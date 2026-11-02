@@ -1,4 +1,4 @@
-# Sprint 01 Rules (v1.6)
+# Sprint 01 Rules (v1.7)
 
 Changes to these rules are listed in `CHANGELOG.md`.
 
@@ -12,6 +12,10 @@ Changes to these rules are listed in `CHANGELOG.md`.
 | Nov 21, 23:59 | Code freeze: tag `sprint-01-freeze`, SHA-256 of every strategy file recorded in `benchmarks/freeze.txt`. |
 | Nov 22 | Preliminary report on the holdout period (Sep 12 - Oct 18). |
 | Dec 7 | Final report on the forward period (Nov 22 - Dec 6), computed on the frozen code. Proposed date; it moves if the cohort agrees. |
+
+Everything pushed to this repository or to a fork of it, draft PRs included, is public from the moment
+it is pushed. Work locally if you do not want an idea seen before you open the PR; the PR has to be in
+before the code freeze.
 
 ## Strategy contract
 
@@ -130,5 +134,7 @@ covered by it (`NOTICE.md`).
 
 ## Reporting a hole in the audit
 
-Report it privately to the maintainer, not in a public issue. Confirmed reports are credited in
-`CHANGELOG.md`.
+Report it privately, not in a public issue or PR: use
+[Report a vulnerability](https://github.com/valiyevoktay-cmd/open-quant-sprint/security/advisories/new)
+on the repository's Security tab. Only you and the maintainer see the report. Confirmed reports are
+credited in `CHANGELOG.md`.
