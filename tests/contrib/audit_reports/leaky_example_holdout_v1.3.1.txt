@@ -1,0 +1,48 @@
+========================================================================
+SYNDICATE AUDIT REPORT :: leaky_example.py
+========================================================================
+    audit v1.3.1 | commit f9c2892 | strategy sha256 dd9387fbb6752cb7
+    data sha256 d68e6159bbdfb2e3 | holdout sha256 e11b641dfdded82f
+    causality seed 20261107 | random cuts 8 (reproduce with --seed 20261107)
+    strategy process: host process
+[1] DATA QUALITY     : DQS=99.93/100 (READY) | rows=297420 | symbols=20 | gaps=0 | funding_irreg=0
+[2] CAUSALITY CHECK  : [FAIL] Look-ahead leak detected at 2025-07-13 13:00:00+00:00: max|w_trunc - w_full| = 3.644e+00 > 1.0e-09 (seed=20261107)
+[3] RANK IC (1h fwd) : mean=-0.02401 | IC_IR=-0.085 | t=-10.42 (p=0.0000)
+[4] RUNTIME          : 23.0 ms (12,945,469 rows/sec)
+------------------------------------------------------------------------
+[5] TRANSACTION COST DECAY MATRIX (1-bar lag + funding included):
+    Fee (bps)      Sharpe     95% CI (block bootstrap)  DSR(N=10)   Ann.Ret     MaxDD  Turnover
+       0.0 bps      -0.19  [-1.60, +1.14] (includes 0)      0.045   -12.32%   -71.11%    1.3648
+       3.0 bps      -5.60               [-7.12, -4.12]      0.000  -370.99%  -637.64%    1.3648
+       5.0 bps      -9.21              [-10.85, -7.56]      0.000  -610.10% -1042.10%    1.3648
+      10.0 bps     -18.21             [-20.23, -16.28]      0.000 -1207.88% -2053.35%    1.3648
+    tiered ~7.7    -14.13             [-15.96, -12.37]      0.000  -936.83% -1594.74%    1.3648
+    tiered = BTC/ETH 5 bps, 6 least liquid by trailing 30d volume 10 bps, others 7 bps
+------------------------------------------------------------------------
+[6] PURGED SPLIT (70% In-Sample / 24h Embargo / 30% Out-of-Sample @ 5.0 bps):
+    In-Sample     : Sharpe=-7.97 [-9.98, -6.07] | DSR=0.000 | Ann.Ret=-571.05% | MaxDD=-680.24%
+    Out-of-Sample : Sharpe=-13.46 [-16.52, -10.88] | DSR=0.000 | Ann.Ret=-693.88% | MaxDD=-356.95%
+    Holdout       : [FAIL] Holdout look-ahead: one-shot weights differ from bar-by-bar weights (max diff=9.912e-02)
+------------------------------------------------------------------------
+[7] LAG SENSITIVITY TEST (+1 extra bar execution lag @ 5.0 bps):
+    1-bar lag SR  : -9.21 | 2-bar lag SR: -10.33 | Retention: 0.0% [FAIL - lookahead leak]
+[8] NULL PIPELINE CHECK (200 daily-block permutations of returns):
+    Null SR mean  : -0.11 (sd 0.83, hurdle |mean| < 0.75) [PASS]
+    Gross SR vs null: p=0.3632 (in-sample, informational only)
+[9] FRICTION DRAG BREAKDOWN (@ 5.0 bps taker fee):
+    Gross PnL     : -21.12%
+    Fee Cost      : +1014.79%
+    Funding Drag  : -0.21%
+    Net PnL       : -1035.70%
+[10] WICK & MARK INTEGRITY (liquidation wick / bad mark hurdle <= 20.0%):
+    Wick PnL Share: 0.9% (3223 anomaly bars) [PASS - structural flow]
+------------------------------------------------------------------------
+[11] EXECUTION REALISM & MODEL BOUNDARIES:
+    Fills         : signal on the close of bar t, filled at that close; lag-2 test = one hour of real delay
+    Costs         : flat taker fee grid + tiered row, snapshot funding on the position held across settlement
+    Scope Caveat  : Excludes orderbook queueing, depth-scaled impact (Almgren-Chriss), & adverse selection
+[12] CORRELATION    : hourly net returns vs baseline_flow.py @ 5 bps = -0.05
+[13] REVIEW FLAGS   : negative shift or centered window (lines 20) (manual review, not part of the verdict)
+========================================================================
+FINAL VERDICT: [REJECT] FAILED AUDIT
+========================================================================
