@@ -399,6 +399,19 @@ BASELINE = dict(
     null_mean=-0.0, null_sd=0.74, null_passed=True,
     wick_share_pct=2.2, wick_passed=True,
 )
+LEAKY = dict(
+    strategy="leaky_example.py", version="1.3.1", commit="f9c2892",
+    verdict="REJECT", causality_passed=False,
+    causality_detail="Look-ahead leak detected at 2025-07-13 "
+    "13:00:00+00:00: max|w_trunc - w_full| = 3.644e+00 > 1.0e-09 "
+    "(seed=20261107)",
+    dqs=99.93, sharpe_5bps=-9.21, sharpe_5bps_ci=(-10.85, -7.56),
+    turnover_5bps=1.3648, oos_sharpe=-13.46,
+    oos_sharpe_ci=(-16.52, -10.88), lag1_sharpe=-9.21,
+    lag2_sharpe=-10.33, lag_passed=False, null_mean=-0.11,
+    null_sd=0.83, null_passed=True, wick_share_pct=0.9,
+    wick_passed=True,
+)
 EXPECTED: dict[str, dict] = {
     REJECT_REPORT: BASELINE,
     # Same strategy and data as above: the format changed between the
@@ -408,18 +421,33 @@ EXPECTED: dict[str, dict] = {
         "causality_detail": "Causal invariance verified across 8 prefix "
         "cuts (max diff=0.00e+00)",
     },
-    "leaky_example_v1.3.1.txt": dict(
-        strategy="leaky_example.py", version="1.3.1", commit="f9c2892",
-        verdict="REJECT", causality_passed=False,
-        causality_detail="Look-ahead leak detected at 2025-07-13 "
-        "13:00:00+00:00: max|w_trunc - w_full| = 3.644e+00 > 1.0e-09 "
-        "(seed=20261107)",
-        dqs=99.93, sharpe_5bps=-9.21, sharpe_5bps_ci=(-10.85, -7.56),
-        turnover_5bps=1.3648, oos_sharpe=-13.46,
-        oos_sharpe_ci=(-16.52, -10.88), lag1_sharpe=-9.21,
-        lag2_sharpe=-10.33, lag_passed=False, null_mean=-0.11,
-        null_sd=0.83, null_passed=True, wick_share_pct=0.9,
-        wick_passed=True,
+    "leaky_example_v1.3.1.txt": LEAKY,
+    # The same run with the official holdout window: one more line.
+    "leaky_example_holdout_v1.3.1.txt": {
+        **LEAKY, "holdout_passed": False,
+        "holdout_detail": "Holdout look-ahead: one-shot weights differ "
+        "from bar-by-bar weights (max diff=9.912e-02)",
+    },
+    # Every check passes but data quality.
+    "baseline_flow_low_dqs_v1.3.1.txt": dict(
+        strategy="baseline_flow.py", version="1.3.1", commit="f9c2892",
+        verdict="REJECT", causality_passed=True,
+        causality_detail="Causal invariance verified across 13 prefix "
+        "cuts (max diff=0.00e+00, seed=20261107)",
+        dqs=74.92, sharpe_5bps=2.85, sharpe_5bps_ci=(-0.74, 6.48),
+        turnover_5bps=0.0508, oos_sharpe=4.27, oos_sharpe_ci=(-2.30, 10.90),
+        lag1_sharpe=2.85, lag2_sharpe=2.69, lag_passed=True,
+        null_mean=0.28, null_sd=1.71, null_passed=True,
+        wick_share_pct=2.4, wick_passed=True,
+    ),
+    # The audit stops before the report (exit code 2).
+    "holdout_late_start_error.txt": dict(
+        problems=[
+            "no audit report in the text, which starts with 'Error: "
+            "holdout starts at 2026-09-12 16:00:00+00:00, expected "
+            "2026-09-12 15:00:00+00:00, one hour after the --data panel "
+            "ends.'"
+        ],
     ),
     PASS_REPORT: dict(
         strategy="baseline_flow.py", version="1.3.1", commit="f9c2892",
@@ -573,6 +601,23 @@ def test_table_of_a_leak_keeps_its_pipes_inside_the_cell() -> None:
     assert _rows(table)["Lag test"][0] == "**FAIL**"
 
 
+def test_table_of_a_failed_holdout() -> None:
+    table = _table(_report("leaky_example_holdout_v1.3.1.txt"))
+    assert _rows(table)["Holdout"] == [
+        "**FAIL**",
+        "`Holdout look-ahead: one-shot weights differ from bar-by-bar "
+        "weights (max diff=9.912e-02)`",
+    ]
+
+
+def test_table_of_an_audit_that_stopped_before_its_report() -> None:
+    # What CI saves when the audit exits with code 2.
+    name = "holdout_late_start_error.txt"
+    problem = EXPECTED[name]["problems"][0]
+    table = audit_table(parse_audit_report(_report(name)), "x")
+    assert table.splitlines() == ["#### `x`", "", f"- `{problem[:157]}...`"]
+
+
 def test_table_of_a_crash() -> None:
     # The values of a crashed run are printed as +0.00 and 0.0000,
     # which rounding cannot tell from slightly above the gate.
@@ -702,15 +747,15 @@ def test_verdict_and_rows_that_disagree_get_a_note() -> None:
 
 
 def test_data_quality_gets_a_row_only_below_the_gate() -> None:
-    assert "Data quality" not in _rows(
-        _table(_report(PASS_REPORT))
-    )
-    text = _edit(_report(PASS_REPORT), "DQS=99.95/100", "DQS=75.5/100")
-    text = _edit(text, "[PASS] SURVIVED", "[REJECT] FAILED")
-    table = _table(text)
-    assert _rows(table)["Data quality"] == [
-        "**FAIL**", f"DQS 75.5/100 (needs >= {DQS_MIN:g})"
+    assert "Data quality" not in _rows(_table(_report(PASS_REPORT)))
+    # A REJECT for the data alone: the row says why, so no note.
+    table = _table(_report("baseline_flow_low_dqs_v1.3.1.txt"))
+    rows = _rows(table)
+    assert rows.pop("Data quality") == [
+        "**FAIL**", f"DQS 74.92/100 (needs >= {DQS_MIN:g})"
     ]
+    assert rows.pop("Verdict")[0] == "**REJECT**"
+    assert {result for result, _ in rows.values()} == {"pass"}
     assert "The verdict is" not in table
 
 
