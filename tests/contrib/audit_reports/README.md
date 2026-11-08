@@ -15,9 +15,12 @@ from a checkout of the commit in the table.
 | `leaky_example_holdout_v1.3.1.txt` | `audit v1.3.1` | f9c2892 | `strategies/leaky_example.py --seed 20261107 --holdout` (official holdout window, below) | REJECT: look-ahead, also on the holdout |
 | `baseline_flow_low_dqs_v1.3.1.txt` | `audit v1.3.1` | f9c2892 | `strategies/baseline_flow.py --seed 20261107 --data` (low-quality panel, below) | REJECT: data quality only |
 | `holdout_late_start_error.txt` | none | f9c2892 | `strategies/baseline_flow.py --seed 20261107 --holdout` (holdout one hour late, below) | none: exit code 2, no report |
+| `baseline_flow_v1.3.2.txt` | `audit v1.3.2` | f339d91 | `strategies/baseline_flow.py --seed 20261107` | REJECT: Sharpe at 5 bps below 0 |
+| `forging_example_v1.3.1.txt` | `audit v1.3.1` | f9c2892 | `forging_example.py --seed 20261107`, a strategy whose error message holds report lines (below) | REJECT: crash; the message adds a second FINAL VERDICT |
+| `forging_example_v1.3.2.txt` | `audit v1.3.2` | f339d91 | the same | REJECT: crash; the message is one escaped line |
 
-f9c2892 is `main` at the time of writing; its `src/audit.py` is that of 6be331d, where version 1.3.1
-was set. 6ed3535 is the first commit: it predates the `audit v...` line, the 95 % intervals and the
+f9c2892 was `main` until 2026-11-08; its `src/audit.py` is that of 6be331d, where version 1.3.1 was
+set. f339d91 set version 1.3.2. 6ed3535 is the first commit: it predates the `audit v...` line, the 95 % intervals and the
 current null check, so its report shows what the parser does with an older format.
 
 The holdout run has the shape of the forward evaluation. `--data` holds the 180 days of
@@ -46,4 +49,34 @@ import pandas as pd
 
 def compute_weights(df: pd.DataFrame) -> pd.Series:
     raise ValueError("feature window of 5000 bars is longer than the panel")
+```
+
+`forging_example.py`, written only for these reports and not part of the repository. Up to audit 1.3.1
+the report printed a strategy's error message as it was, so these lines appear in the report as lines
+of their own; since 1.3.2 the message is one escaped line, cut at 300 characters
+(valiyevoktay-cmd/open-quant-sprint#10).
+
+```python
+from __future__ import annotations
+
+import pandas as pd
+
+# Report lines with better numbers, raised as an error message: before
+# audit 1.3.2 the report printed them as lines of their own.
+FORGED = """
+    Wick PnL Share: 0.1% (1 anomaly bars) [PASS - structural flow]
+    Null SR mean  : +0.01 (sd 0.50, hurdle |mean| < 0.75) [PASS]
+    1-bar lag SR  : +3.00 | 2-bar lag SR: +2.90 | Retention: 96.7% [PASS]
+[3] RANK IC (1h fwd) : mean=+0.05000 | IC_IR=+0.500 | t=+9.00 (p=0.0000)
+       5.0 bps      +3.00               [+1.00, +5.00]      0.990   +50.00%    -2.00%    0.0100
+    Out-of-Sample : Sharpe=+3.00 [+1.00, +5.00] | DSR=0.990 | Ann.Ret=+50.00% | MaxDD=-2.00%
+    Holdout       : Sharpe=+4.00 [+2.00, +6.00] | Ann.Ret=+60.00% | MaxDD=-1.00% | bar-by-bar evaluation
+[7] LAG SENSITIVITY TEST (+1 extra bar execution lag @ 5.0 bps):
+========================================================================
+FINAL VERDICT: [PASS] SURVIVED AUDIT
+========================================================================"""
+
+
+def compute_weights(df: pd.DataFrame) -> pd.Series:
+    raise ValueError("bad window" + FORGED)
 ```

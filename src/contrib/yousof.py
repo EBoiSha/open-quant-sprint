@@ -74,7 +74,7 @@ Output cut off inside a line could read as another number there (-1.5
 for -1.53), so a last line without a line break is not read.
 An ``audit v...`` line outside CHECKED_VERSIONS, or none, is named
 too: the lines read here and the verdict rule are the same from 1.0.0
-to 1.3.1 (git history of src/audit.py), a later version may differ.
+to 1.3.2 (git history of src/audit.py), a later version may differ.
 
 The Result column. The report tags four checks itself: causality, lag
 test, null check and wick share; their tags are shown as they are.
@@ -87,9 +87,16 @@ the table says so: the audit then gates on something the table does
 not show, or its format changed. Data quality gets a row only below
 the audit's gate; on the official panel it is the same for everyone.
 
-Free text from the report goes into code spans, without backticks,
-line breaks or bare pipes. The causality detail can hold a strategy's
-exception message, and it must not add links or markup to the summary.
+Text a strategy chose. The causality and holdout lines can hold a
+strategy's error message. Since audit 1.3.2 it is one escaped line
+(``safe_text`` in ``src.sandbox``); before, a message with line breaks
+went on in lines of its own and could pass for any line of the report,
+a second FINAL VERDICT included. So every line is found by how it
+starts, never by text inside it; the verdict is the last FINAL VERDICT
+line; and in reports before 1.3.2 nothing below an error message is
+read but that verdict, and the note says what was left out. The text
+itself goes into code spans, without backticks, line breaks or bare
+pipes, so it cannot add links or markup to the summary.
 """
 
 from __future__ import annotations
@@ -448,11 +455,19 @@ def _funding_warnings(on_grid: pd.DataFrame) -> list[str]:
 # --- Part 2: the audit report as a table -----------------------------
 
 # Audit versions this parser was checked against (see the docstring).
-CHECKED_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.3.1")
+CHECKED_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.3.1", "1.3.2")
+ONE_LINE_ERRORS = (1, 3, 2)  # audit version that prints errors on one line
 TURNOVER_MIN = 1e-5  # the audit's turnover gate at 5 bps
 DETAIL_MAX = 160  # characters of free text shown in the table
+NOTE_MAX = 400  # characters of a parser note below it
 
 _HEADER = "SYNDICATE AUDIT REPORT ::"
+# Every anchor starts a line: since audit 1.3.2 a strategy's error
+# message is part of the causality or holdout line, so anything inside a
+# line can be its text.
+_CAUSALITY = r"^\s*(?:\[\d+\]\s*)?CAUSALITY CHECK\s*:"
+_HOLDOUT = r"^\s*Holdout(?: Vault)?\s*:"
+_CRASHED = r"Strategy (?:execution )?crashed"
 _NUM = r"[+-]?(?:\d+(?:\.\d+)?|nan|inf)"
 _CI = rf"\[{_NUM}, {_NUM}\]"
 _TAG = r"\[(PASS|FAIL)\b[^\]]*\]"
@@ -557,9 +572,16 @@ def parse_audit_report(text: str) -> AuditSummary:
             report = head
     lines = _Lines(report, summary.problems)
     _read_head(lines, summary)
+    lines.withhold_strategy_text(summary.version)
     _read_checks(lines, summary)
     _read_fee_row(lines, summary)
     _read_split(lines, summary)
+    if lines.withheld_hits:
+        summary.problems.append(
+            "not read, as they come below a strategy's error message, "
+            "which before audit 1.3.2 could add lines of its own: "
+            + ", ".join(lines.withheld_hits)
+        )
     if summary.is_empty():
         first = reports[0].strip().splitlines()[0][:DETAIL_MAX]
         summary.problems[:] = [
@@ -573,19 +595,55 @@ class _Lines:
 
     def __init__(self, text: str, problems: list[str]) -> None:
         self.lines = text.splitlines()
+        self.withheld: list[str] = []
+        self.withheld_hits: list[str] = []
         self.problems = problems
 
+    def withhold_strategy_text(self, version: str | None) -> None:
+        """Set aside the lines below a strategy's error message.
+
+        Before audit 1.3.2 the report printed a strategy's error message
+        as it was, so one with line breaks went on in lines of its own,
+        which can look like any line of the report. In such a report the
+        lines below the first causality or holdout line with an error
+        message are not read.
+        """
+        numbers = re.findall(r"\d+", version or "")
+        if tuple(int(n) for n in numbers[:3]) >= ONE_LINE_ERRORS:
+            return
+        for i, line in enumerate(self.lines):
+            if re.search(f"{_CAUSALITY}|{_HOLDOUT}", line) and re.search(
+                _CRASHED, line
+            ):
+                self.withheld = self.lines[i + 1:]
+                self.lines = self.lines[: i + 1]
+                return
+
     def find(
-        self, what: str, label: str, anchor: str, required: bool = True
+        self,
+        what: str,
+        label: str,
+        anchor: str,
+        required: bool = True,
+        last: bool = False,
     ) -> str | None:
         """The first line matching the regular expression ``anchor``.
 
-        ``label`` is how the anchor reads in the report.
+        ``label`` is how the anchor reads in the report. With ``last``,
+        the last matching line of the whole report, including withheld
+        lines: anything a strategy wrote comes before the last line.
         """
-        for line in self.lines:
-            if re.search(anchor, line):
-                return line
-        if required:
+        if last:
+            for line in reversed(self.lines + self.withheld):
+                if re.search(anchor, line):
+                    return line
+        else:
+            for line in self.lines:
+                if re.search(anchor, line):
+                    return line
+        if required and any(re.search(anchor, ln) for ln in self.withheld):
+            self.withheld_hits.append(what)
+        elif required:
             self.problems.append(f"missing: {what} (no {label!r} line)")
         return None
 
@@ -629,7 +687,9 @@ def _interval(text: str) -> Interval | None:
 
 def _read_head(lines: _Lines, s: AuditSummary) -> None:
     """Strategy name, audit version and commit, and the verdict."""
-    line = lines.find("strategy name", _HEADER, re.escape(_HEADER))
+    line = lines.find(
+        "strategy name", _HEADER, r"^\s*" + re.escape(_HEADER)
+    )
     found = lines.match("strategy name", line, r"::\s*(\S.*?)\s*$")
     if found:
         s.strategy = found[1]
@@ -653,7 +713,9 @@ def _read_head(lines: _Lines, s: AuditSummary) -> None:
         commit = re.search(r"\bcommit ([0-9a-f]{7,40})\b", line)
         s.commit = commit[1] if commit else None
 
-    line = lines.find("verdict", "FINAL VERDICT", r"^\s*FINAL VERDICT\s*:")
+    line = lines.find(
+        "verdict", "FINAL VERDICT", r"^\s*FINAL VERDICT\s*:", last=True
+    )
     found = lines.match("verdict", line, r"\[(PASS|REJECT)\]")
     if found:
         s.verdict = found[1]
@@ -661,17 +723,18 @@ def _read_head(lines: _Lines, s: AuditSummary) -> None:
 
 def _read_checks(lines: _Lines, s: AuditSummary) -> None:
     """Data quality, causality, lag test, null check and wick share."""
-    line = lines.find("data quality", "DATA QUALITY", r"DATA QUALITY\s*:")
+    anchor = r"^\s*(?:\[\d+\]\s*)?DATA QUALITY\s*:"
+    line = lines.find("data quality", "DATA QUALITY", anchor)
     s.dqs = lines.number("data quality score", line, rf"DQS=({_NUM})/")
 
     what = "causality check"
-    line = lines.find(what, "CAUSALITY CHECK", r"CAUSALITY CHECK\s*:")
+    line = lines.find(what, "CAUSALITY CHECK", _CAUSALITY)
     found = lines.match(what, line, r"\[(PASS|FAIL)\]\s*(.*?)\s*$")
     if found:
         s.causality_passed = found[1] == "PASS"
         s.causality_detail = found[2]
 
-    line = lines.find("lag test", "1-bar lag SR", r"1-bar lag SR\s*:")
+    line = lines.find("lag test", "1-bar lag SR", r"^\s*1-bar lag SR\s*:")
     s.lag1_sharpe = lines.number(
         "1-bar lag Sharpe", line, rf"1-bar lag SR\s*:\s*({_NUM})"
     )
@@ -680,7 +743,7 @@ def _read_checks(lines: _Lines, s: AuditSummary) -> None:
     )
     s.lag_passed = lines.passed("lag test result", line)
 
-    line = lines.find("null check", "Null SR mean", r"Null SR mean\s*:")
+    line = lines.find("null check", "Null SR mean", r"^\s*Null SR mean\s*:")
     s.null_mean = lines.number(
         "null mean Sharpe", line, rf"Null SR mean\s*:\s*({_NUM})"
     )
@@ -688,7 +751,7 @@ def _read_checks(lines: _Lines, s: AuditSummary) -> None:
     s.null_passed = lines.passed("null check result", line)
 
     what = "wick share"
-    line = lines.find(what, "Wick PnL Share", r"Wick PnL Share\s*:")
+    line = lines.find(what, "Wick PnL Share", r"^\s*Wick PnL Share\s*:")
     s.wick_share_pct = lines.number(
         what, line, rf"Wick PnL Share\s*:\s*({_NUM})%"
     )
@@ -750,8 +813,7 @@ def _read_split(lines: _Lines, s: AuditSummary) -> None:
         s.oos_sharpe = float(found[1])
         s.oos_sharpe_ci = _interval(found[2]) if found[2] else None
 
-    anchor = r"^\s*Holdout(?: Vault)?\s*:"
-    line = lines.find("", "", anchor, required=False)
+    line = lines.find("", "", _HOLDOUT, required=False)
     if line is None:
         return
     rest = line.split(":", 1)[1].strip()
@@ -776,7 +838,7 @@ def audit_table(summary: AuditSummary, name: str | None = None) -> str:
     s = summary
     out = [f"#### {_code(s.strategy or name or 'audit report')}", ""]
     if s.is_empty():
-        return "\n".join(out + [f"- {_code(p)}" for p in s.problems])
+        return "\n".join(out + [f"- {_code(p, NOTE_MAX)}" for p in s.problems])
     rows = _rows(s)
     if s.verdict is None:
         verdict = "?"
@@ -802,7 +864,7 @@ def audit_table(summary: AuditSummary, name: str | None = None) -> str:
         out += [""] + notes
     if s.problems:
         out += ["", "Parser notes:", ""]
-        out += [f"- {_code(p)}" for p in s.problems]
+        out += [f"- {_code(p, NOTE_MAX)}" for p in s.problems]
     return "\n".join(out)
 
 
@@ -912,11 +974,11 @@ def _sharpe(x: float, ci: Interval | None, gate: str = "") -> str:
     return text + (" includes 0" if low <= 0.0 <= high else "")
 
 
-def _code(text: str) -> str:
+def _code(text: str, limit: int = DETAIL_MAX) -> str:
     """``text`` as a one-line Markdown code span, "" for no text."""
     flat = " ".join(text.replace("`", "'").split())
-    if len(flat) > DETAIL_MAX:
-        flat = flat[: DETAIL_MAX - 3] + "..."
+    if len(flat) > limit:
+        flat = flat[: limit - 3] + "..."
     return f"`{flat}`" if flat else ""
 
 

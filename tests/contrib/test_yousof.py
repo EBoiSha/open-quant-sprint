@@ -383,9 +383,14 @@ CAUSAL_14 = (
     "Causal invariance verified across 14 prefix cuts "
     "(max diff=0.00e+00, seed=20261107)"
 )
+WITHHELD_NOTE = (
+    "not read, as they come below a strategy's error message, which "
+    "before audit 1.3.2 could add lines of its own: lag test, null check, "
+    "wick share, fee table, 5 bps row, out-of-sample Sharpe"
+)
 VERSION_NOTE = (
     "audit v{} is not one this parser was checked against (1.0.0 to "
-    "1.3.1); compare the table with the report"
+    "1.3.2); compare the table with the report"
 )
 
 # What the saved reports hold, read off them by hand. Fields not named
@@ -440,6 +445,39 @@ EXPECTED: dict[str, dict] = {
         null_mean=0.28, null_sd=1.71, null_passed=True,
         wick_share_pct=2.4, wick_passed=True,
     ),
+    # Version 1.3.2 changed how error messages are printed, not the
+    # numbers.
+    "baseline_flow_v1.3.2.txt": {
+        **BASELINE, "version": "1.3.2", "commit": "f339d91",
+    },
+    # An error message with report lines in it. Before 1.3.2 they were
+    # lines of the report, a second FINAL VERDICT included, so nothing
+    # below the message is read but the last verdict line.
+    "forging_example_v1.3.1.txt": dict(
+        strategy="forging_example.py", version="1.3.1", commit="f9c2892",
+        verdict="REJECT", causality_passed=False,
+        causality_detail="Strategy execution crashed: ValueError: bad "
+        "window",
+        dqs=99.93,
+        problems=[WITHHELD_NOTE],
+    ),
+    # Since 1.3.2 the message is part of the causality line, and the
+    # lines below it are the audit's own.
+    "forging_example_v1.3.2.txt": dict(
+        strategy="forging_example.py", version="1.3.2", commit="f339d91",
+        verdict="REJECT", causality_passed=False,
+        causality_detail="Strategy execution crashed: ValueError: bad "
+        "window | Wick PnL Share: 0.1% (1 anomaly bars) [PASS - structural "
+        "flow] | Null SR mean  : +0.01 (sd 0.50, hurdle |mean| < 0.75) "
+        "[PASS] | 1-bar lag SR  : +3.00 | 2-bar lag SR: +2.90 | Retention: "
+        "96.7% [PASS] | [3] RANK IC (1h fwd) : mean=+0.05000 | IC_IR=+0.500 "
+        "| t=+9.0 ...[truncated]",
+        dqs=99.93, sharpe_5bps=0.0, sharpe_5bps_ci=(math.nan, math.nan),
+        turnover_5bps=0.0, oos_sharpe=0.0,
+        oos_sharpe_ci=(math.nan, math.nan), lag1_sharpe=0.0,
+        lag2_sharpe=0.0, lag_passed=False, null_mean=0.0, null_sd=0.0,
+        null_passed=False, wick_share_pct=100.0, wick_passed=False,
+    ),
     # The audit stops before the report (exit code 2).
     "holdout_late_start_error.txt": dict(
         problems=[
@@ -465,11 +503,10 @@ EXPECTED: dict[str, dict] = {
         verdict="REJECT", causality_passed=False,
         causality_detail="Strategy execution crashed: ValueError: feature "
         "window of 5000 bars is longer than the panel",
-        dqs=99.93, sharpe_5bps=0.0, sharpe_5bps_ci=(math.nan, math.nan),
-        turnover_5bps=0.0, oos_sharpe=0.0,
-        oos_sharpe_ci=(math.nan, math.nan), lag1_sharpe=0.0,
-        lag2_sharpe=0.0, lag_passed=False, null_mean=0.0, null_sd=0.0,
-        null_passed=False, wick_share_pct=100.0, wick_passed=False,
+        dqs=99.93,
+        # Before 1.3.2 an error message can go on in lines of its own,
+        # so nothing below it is read.
+        problems=[WITHHELD_NOTE],
     ),
     # Before audit 1.0.0: no version line, no intervals, another null
     # check.
@@ -615,13 +652,57 @@ def test_table_of_an_audit_that_stopped_before_its_report() -> None:
     name = "holdout_late_start_error.txt"
     problem = EXPECTED[name]["problems"][0]
     table = audit_table(parse_audit_report(_report(name)), "x")
-    assert table.splitlines() == ["#### `x`", "", f"- `{problem[:157]}...`"]
+    assert table.splitlines() == ["#### `x`", "", f"- `{problem}`"]
+
+
+def test_error_message_cannot_pass_for_report_lines() -> None:
+    # Before 1.3.2: the forged lines are not read, the verdict is the
+    # audit's own and the note says what was left out.
+    table = _table(_report("forging_example_v1.3.1.txt"))
+    rows = _rows(table)
+    assert rows.pop("Verdict")[0] == "**REJECT**"
+    assert rows.pop("Causality")[0] == "**FAIL**"
+    assert set(map(tuple, rows.values())) == {("?", "not read, see below")}
+    assert f"- `{WITHHELD_NOTE}`" in table
+    assert "+3.00" not in table and "Holdout" not in rows
+    # Since 1.3.2: the same text inside the causality line is not taken
+    # for the lines it imitates.
+    rows = _rows(_table(_report("forging_example_v1.3.2.txt")))
+    assert rows["Wick share"] == ["**FAIL**", "100.0 % of positive PnL"]
+    assert rows["Lag test"][1] == "2-bar lag Sharpe +0.00, 1-bar +0.00"
+
+
+def test_error_message_in_the_holdout_line_before_1_3_2() -> None:
+    # Lines above the holdout line are the audit's; below it, only the
+    # last verdict line is read.
+    holdout = (
+        "    Holdout       : Sharpe=+3.10 [-6.78, +13.09] (includes 0) | "
+        "Ann.Ret=+64.98% | MaxDD=-3.72% | bar-by-bar evaluation"
+    )
+    crashed = (
+        "    Holdout       : [FAIL] Strategy crashed on holdout: "
+        "ValueError: x\n    Wick PnL Share: 0.1% (1 anomaly bars) [PASS]"
+    )
+    text = _edit(_report(PASS_REPORT), holdout, crashed)
+    summary = parse_audit_report(text)
+    assert summary.holdout_passed is False
+    assert summary.holdout_detail == (
+        "Strategy crashed on holdout: ValueError: x"
+    )
+    assert (summary.sharpe_5bps, summary.oos_sharpe) == (1.45, 0.36)
+    assert summary.wick_share_pct is None and summary.lag_passed is None
+    assert summary.verdict == "PASS"
+    assert summary.problems == [
+        "not read, as they come below a strategy's error message, which "
+        "before audit 1.3.2 could add lines of its own: lag test, null "
+        "check, wick share"
+    ]
 
 
 def test_table_of_a_crash() -> None:
     # The values of a crashed run are printed as +0.00 and 0.0000,
     # which rounding cannot tell from slightly above the gate.
-    report = _report("crashing_example_v1.3.1.txt")
+    report = _report("forging_example_v1.3.2.txt")
     rows = _rows(_table(report))
     assert rows["Sharpe @ 5 bps"] == ["?", "+0.00 (needs > 0), 95 % CI n/a"]
     assert rows["Turnover @ 5 bps"] == ["?", "0.0000 (needs > 1e-05)"]
