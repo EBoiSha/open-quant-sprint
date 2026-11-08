@@ -37,6 +37,8 @@ Checks beyond the Issue, and what each is for:
   is never more than 0.25 % from the previous close.
 - Rows without a timestamp or a symbol. They have no place on the
   grid; they are reported and left out of the other checks.
+- Timestamps stored as numbers. ``enforce_schema`` would read epoch
+  milliseconds as nanoseconds, and every bar would land on 1970-01-01.
 - Missing values, OHLC and volume sanity, non-positive prices and the
   data quality score, all from ``src.quality.audit_dataset``. The
   audit scores only the panel passed as ``--data``; the new file is
@@ -159,6 +161,14 @@ def _prepare(
 
     frames = []
     for name, df in named:
+        if pd.api.types.is_numeric_dtype(df["timestamp"]):
+            # enforce_schema would read the numbers as nanoseconds
+            # since 1970 and every bar would land on 1970-01-01.
+            errors.append(
+                f"timestamp in {name} is {df['timestamp'].dtype}, not a "
+                "time; read as nanoseconds since 1970 it would be wrong"
+            )
+            continue
         try:
             frame = enforce_schema(df)
         except (ValueError, TypeError) as exc:
@@ -183,6 +193,8 @@ def _prepare(
         return errors, None
 
     prev, new = frames
+    # enforce_schema casts both frames to the schema, so this fires only
+    # if enforce_schema itself stops doing that.
     differing = [
         f"{col} {new[col].dtype} vs {prev[col].dtype}"
         for col in REQUIRED_COLS

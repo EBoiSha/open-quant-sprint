@@ -91,6 +91,31 @@ def test_timestamp_unit_does_not_matter(
     assert check_continuation(prev, new) == []
 
 
+def test_overlap_is_found_across_timestamp_units(split: Split) -> None:
+    # The keys of a ms panel and a ns file are compared on one unit, so
+    # an overlapping hour is not missed.
+    prev, new = split
+    last = prev.loc[prev["timestamp"] == prev["timestamp"].max()]
+    overlapping = pd.concat([last, new], ignore_index=True)
+    prev = prev.assign(timestamp=prev["timestamp"].dt.as_unit("ms"))
+    new = overlapping.assign(
+        timestamp=overlapping["timestamp"].dt.as_unit("ns")
+    )
+    errors = _errors(check_continuation(prev, new))
+    already = f"{len(last)} (timestamp, symbol) keys of new are already"
+    assert any(already in line for line in errors)
+
+
+def test_timestamps_stored_as_numbers_are_named(split: Split) -> None:
+    # Epoch milliseconds as int64 would be read as nanoseconds: 1970.
+    prev, new = split
+    millis = new["timestamp"].dt.as_unit("ms").astype("int64")
+    assert check_continuation(prev, new.assign(timestamp=millis)) == [
+        "error: timestamp in new is int64, not a time; read as "
+        "nanoseconds since 1970 it would be wrong"
+    ]
+
+
 def test_column_order_does_not_matter(split: Split) -> None:
     prev, new = split
     assert check_continuation(prev, new[new.columns[::-1]]) == []
