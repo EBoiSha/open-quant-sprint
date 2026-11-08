@@ -473,6 +473,7 @@ _CI = rf"\[{_NUM}, {_NUM}\]"
 _TAG = r"\[(PASS|FAIL)\b[^\]]*\]"
 
 Interval = tuple[float, float]
+Row = tuple[str, bool | None, str]  # label, result, value
 
 
 @dataclass
@@ -647,6 +648,10 @@ class _Lines:
             self.problems.append(f"missing: {what} (no {label!r} line)")
         return None
 
+    def find_optional(self, anchor: str) -> str | None:
+        """The first line matching ``anchor``; none is no problem."""
+        return next((ln for ln in self.lines if re.search(anchor, ln)), None)
+
     def match(
         self, what: str, line: str | None, pattern: str
     ) -> re.Match[str] | None:
@@ -694,7 +699,7 @@ def _read_head(lines: _Lines, s: AuditSummary) -> None:
     if found:
         s.strategy = found[1]
 
-    line = lines.find("", "", r"^\s*audit v", required=False)
+    line = lines.find_optional(r"^\s*audit v")
     found = lines.match("audit version", line, r"audit v(\d[0-9A-Za-z.+-]*)")
     if line is None:
         lines.problems.append(
@@ -813,7 +818,7 @@ def _read_split(lines: _Lines, s: AuditSummary) -> None:
         s.oos_sharpe = float(found[1])
         s.oos_sharpe_ci = _interval(found[2]) if found[2] else None
 
-    line = lines.find("", "", _HOLDOUT, required=False)
+    line = lines.find_optional(_HOLDOUT)
     if line is None:
         return
     rest = line.split(":", 1)[1].strip()
@@ -868,9 +873,6 @@ def audit_table(summary: AuditSummary, name: str | None = None) -> str:
     return "\n".join(out)
 
 
-Row = tuple[str, bool | None, str]
-
-
 def _rows(s: AuditSummary) -> list[Row]:
     """(label, result, value) for each check below the verdict."""
     unread = "not read, see below"
@@ -900,7 +902,7 @@ def _rows(s: AuditSummary) -> list[Row]:
         null += f", sd {s.null_sd:.2f}" if s.null_sd is not None else ""
     wick = unread
     if s.wick_share_pct is not None:
-        wick = f"{s.wick_share_pct:.1f} % of positive PnL"
+        wick = f"{s.wick_share_pct:.1f}% of positive PnL"
     turnover = unread
     if s.turnover_5bps is not None:
         turnover = f"{s.turnover_5bps:.4f}"
@@ -969,8 +971,8 @@ def _sharpe(x: float, ci: Interval | None, gate: str = "") -> str:
         return text
     low, high = ci
     if math.isnan(low) or math.isnan(high):
-        return f"{text}, 95 % CI n/a"
-    text += f", 95 % CI [{low:+.2f}, {high:+.2f}]"
+        return f"{text}, 95% CI n/a"
+    text += f", 95% CI [{low:+.2f}, {high:+.2f}]"
     return text + (" includes 0" if low <= 0.0 <= high else "")
 
 

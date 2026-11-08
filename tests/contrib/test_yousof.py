@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import math
+import os
 import re
 import subprocess
 import sys
@@ -600,15 +601,15 @@ def test_table_of_a_pass_with_holdout() -> None:
         "| --- | --- | --- |",
         "| Verdict | PASS | audit v1.3.1, commit f9c2892 |",
         f"| Causality | pass | `{CAUSAL_14}` |",
-        "| Sharpe @ 5 bps | pass | +1.45, 95 % CI [-1.27, +4.15] "
+        "| Sharpe @ 5 bps | pass | +1.45, 95% CI [-1.27, +4.15] "
         "includes 0 |",
-        "| Out-of-sample Sharpe | pass | +0.36, 95 % CI [-4.66, +6.02] "
+        "| Out-of-sample Sharpe | pass | +0.36, 95% CI [-4.66, +6.02] "
         "includes 0 |",
         "| Lag test | pass | 2-bar lag Sharpe +1.64, 1-bar +1.45 |",
         "| Null check | pass | mean Sharpe +0.50, sd 1.33 |",
-        "| Wick share | pass | 1.8 % of positive PnL |",
+        "| Wick share | pass | 1.8% of positive PnL |",
         "| Turnover @ 5 bps | pass | 0.0513 |",
-        "| Holdout | pass | +3.10, 95 % CI [-6.78, +13.09] includes 0, "
+        "| Holdout | pass | +3.10, 95% CI [-6.78, +13.09] includes 0, "
         "`bar-by-bar evaluation` |",
     ]
 
@@ -619,7 +620,7 @@ def test_table_of_a_reject_shows_the_failed_check() -> None:
     assert rows["Verdict"] == ["**REJECT**", "audit v1.3.1, commit f9c2892"]
     assert rows["Sharpe @ 5 bps"] == [
         "**FAIL**",
-        "-1.53 (needs > 0), 95 % CI [-3.00, +0.07] includes 0",
+        "-1.53 (needs > 0), 95% CI [-3.00, +0.07] includes 0",
     ]
     del rows["Verdict"], rows["Sharpe @ 5 bps"]
     assert [result for result, _ in rows.values()] == ["pass"] * 6
@@ -668,7 +669,7 @@ def test_error_message_cannot_pass_for_report_lines() -> None:
     # Since 1.3.2: the same text inside the causality line is not taken
     # for the lines it imitates.
     rows = _rows(_table(_report("forging_example_v1.3.2.txt")))
-    assert rows["Wick share"] == ["**FAIL**", "100.0 % of positive PnL"]
+    assert rows["Wick share"] == ["**FAIL**", "100.0% of positive PnL"]
     assert rows["Lag test"][1] == "2-bar lag Sharpe +0.00, 1-bar +0.00"
 
 
@@ -704,7 +705,7 @@ def test_table_of_a_crash() -> None:
     # which rounding cannot tell from slightly above the gate.
     report = _report("forging_example_v1.3.2.txt")
     rows = _rows(_table(report))
-    assert rows["Sharpe @ 5 bps"] == ["?", "+0.00 (needs > 0), 95 % CI n/a"]
+    assert rows["Sharpe @ 5 bps"] == ["?", "+0.00 (needs > 0), 95% CI n/a"]
     assert rows["Turnover @ 5 bps"] == ["?", "0.0000 (needs > 1e-05)"]
     assert rows["Causality"][0] == "**FAIL**"
 
@@ -788,11 +789,15 @@ def test_output_cut_anywhere_gives_no_wrong_value(name: str) -> None:
     # right one or None, and a lost value is always named.
     text = _report(name)
     full = _parsed(text)
+    named = ("the text ends inside a line", "missing:", "no audit report")
     for cut in range(len(text) + 1):
         parsed = _parsed(text[:cut])
         problems = parsed.pop("problems")
-        lost = [k for k, v in parsed.items() if v is None and full[k]]
-        assert not lost or problems, cut
+        lost = [
+            k for k, v in parsed.items() if v is None and full[k] is not None
+        ]
+        if lost:
+            assert any(p.startswith(named) for p in problems), (cut, lost)
         assert all(
             v is None or v == full[k] for k, v in parsed.items()
         ), (cut, text[:cut][-40:])
@@ -916,8 +921,22 @@ def test_command_line(
     assert out.endswith(tables[0] + "\n")
 
 
+def test_runs_as_a_copied_script(tmp_path: Path) -> None:
+    # The way CI calls it: a copy of the file as it is on main.
+    repo = Path(__file__).resolve().parents[2]
+    script = tmp_path / "audit_table.py"
+    script.write_bytes((repo / "src/contrib/yousof.py").read_bytes())
+    path = REPORTS / PASS_REPORT
+    done = subprocess.run(
+        [sys.executable, str(script), str(path)],
+        capture_output=True, text=True, timeout=60, check=False,
+        env={**os.environ, "PYTHONPATH": str(repo)},
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == _table(_report(path.name)) + "\n"
+
+
 def test_runs_as_a_module() -> None:
-    # The way CI calls it.
     path = REPORTS / PASS_REPORT
     done = subprocess.run(
         [sys.executable, "-m", "src.contrib.yousof", str(path)],
