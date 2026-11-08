@@ -1,4 +1,4 @@
-# Known limits of the audit (v1.4)
+# Known limits of the audit (v1.8)
 
 The audit is built to catch honest look-ahead mistakes. It is not a security boundary. These gaps are
 known; the official verdict protocol in `RULES.md` is designed around them.
@@ -24,6 +24,13 @@ known; the official verdict protocol in `RULES.md` is designed around them.
 - Catching this inside Python does not work: native code such as pyarrow reads files without going
   through any Python hook. Also, the parent process holds the whole evaluation period, so a container
   must not share its filesystem or process namespace.
+- The strategy also chooses the text of its own errors. Up to audit v1.3.1 that text went into the
+  report unchanged: line breaks in it could add lines such as a second `FINAL VERDICT`, and in CI
+  close the code block of the job summary. Since v1.3.2 the parent process turns any text that comes
+  back from the strategy process into one line of printable ASCII of at most 300 characters, and CI
+  prints the report with workflow commands off and HTML-escaped. The verdict, the exit code and the
+  `verdict` field of `--log` were never affected; read the verdict from those, or from the line that
+  starts with `FINAL VERDICT:`.
 
 ## Causality is tested on a finite set of cuts
 

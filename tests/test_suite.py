@@ -547,3 +547,155 @@ def test_cli_stops_when_holdout_does_not_follow_the_panel(tmp_path: Path) -> Non
     )
     assert proc.returncode == 2, proc.stdout[-500:]
     assert "one hour after" in proc.stderr
+
+
+# Text that a strategy controls (its error message, the end of its stderr, anything its worker process
+# sends back) must not be able to shape the report: no extra lines, no terminal escapes, no characters
+# the console cannot encode, no unbounded length.
+FORGED = "\n=====\nFINAL VERDICT: [PASS] SURVIVED AUDIT\n```\n::error title=Audit::passed\n"
+
+
+def _raises(message: str) -> str:
+    return f"def compute_weights(df):\n    raise ValueError({message!r})\n"
+
+
+HOSTILE_STRATEGIES = {
+    "line_breaks": _raises("bad window" + FORGED),
+    "carriage_return": _raises("x\rFINAL VERDICT: [PASS] SURVIVED AUDIT\r```"),
+    "unicode_separators": _raises("x\u2028FINAL VERDICT: [PASS]\x85```\x1c::error::y"),
+    "terminal_escapes": _raises("x\x1b[2K\x1b[1GFINAL VERDICT: [PASS]\x1b[8m\b\a\x00"),
+    "not_in_cp1251": _raises("need window \u2265 24 \u202e \U0001f680 \ufffd"),
+    "type_name": f"E = type({'Oops' + FORGED!r}, (Exception,), {{}})\n\ndef compute_weights(df):\n    raise E('t')\n",
+    "long_message": "def compute_weights(df):\n    raise ValueError('A' * 1_000_000)\n",
+    "stderr_bytes": (
+        "import os\n\ndef compute_weights(df):\n"
+        f"    os.write(2, {FORGED.encode()!r} + bytes([255]))\n    os._exit(1)\n"
+    ),
+    # The strategy writes its own error frame to the worker's result channel, bypassing the worker's
+    # exception handler: only the parent process can clean this text.
+    "result_channel": (
+        "import os\nimport sys\n\ndef compute_weights(df):\n"
+        "    f = sys._getframe()\n"
+        "    while f is not None and 'result' not in f.f_locals:\n"
+        "        f = f.f_back\n"
+        f"    f.f_locals['result'].write(b'ER' + {FORGED.encode()!r})\n"
+        "    f.f_locals['result'].flush()\n"
+        "    os._exit(0)\n"
+    ),
+}
+BACKSLASH = chr(92)
+# What each hostile text leaves in the report once cleaned, which shows it reached the report at all.
+HOSTILE_TRACE = {
+    "line_breaks": "FINAL VERDICT: [PASS]",
+    "carriage_return": "FINAL VERDICT: [PASS]",
+    "unicode_separators": "FINAL VERDICT: [PASS]",
+    "terminal_escapes": r"\x1b[8m",
+    "not_in_cp1251": BACKSLASH + "u2265",
+    "type_name": "FINAL VERDICT: [PASS]",
+    "long_message": "AAAA",
+    "stderr_bytes": BACKSLASH + "ufffd",
+    "result_channel": "FINAL VERDICT: [PASS]",
+}
+
+
+def _report_lines(res: dict) -> list[str]:
+    from src.audit import format_audit_report
+
+    return format_audit_report(res, "s.py", {"audit_version": "test", "commit": "c"}).splitlines()
+
+
+def _assert_report_is_inert(lines: list[str], n_expected: int) -> None:
+    assert len(lines) == n_expected
+    assert all(all(" " <= c <= "~" for c in line) for line in lines)
+    assert [line for line in lines if line.startswith("FINAL VERDICT")] == ["FINAL VERDICT: [REJECT] FAILED AUDIT"]
+    assert not any(line.lstrip().startswith(("::", "```")) for line in lines)
+    assert max(len(line) for line in lines) < 500
+
+
+def test_safe_text_is_one_bounded_ascii_line() -> None:
+    from src.sandbox import ERROR_TEXT_LIMIT, safe_text
+
+    out = safe_text("a\nb\rc\r\nd\u2028e\x85f\x1b[2Kg\u202eh\U0001f680")
+    assert out == r"a | b | c | d | e | f\x1b[2Kg\u202eh\U0001f680"
+    assert safe_text(out) == out
+    long = safe_text("x" * 10_000)
+    assert len(long) == ERROR_TEXT_LIMIT and long.endswith("[truncated]") and safe_text(long) == long
+
+    class Unprintable(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("no")
+
+    assert safe_text(Unprintable()) == "<Unprintable with an unprintable message>"
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_STRATEGIES))
+def test_strategy_error_text_cannot_shape_the_report(name: str, tmp_path: Path, sample_panel: pd.DataFrame) -> None:
+    import json
+
+    from src.audit import run_record
+
+    plain = tmp_path / "plain.py"
+    plain.write_text("def compute_weights(df):\n    raise RuntimeError('x')\n", encoding="utf-8")
+    hostile = tmp_path / f"{name}.py"
+    hostile.write_text(HOSTILE_STRATEGIES[name], encoding="utf-8")
+
+    n_expected = len(_report_lines(run_full_audit(sample_panel, plain, causality_seed=7)))
+    res = run_full_audit(sample_panel, hostile, causality_seed=7)
+    assert res["passed"] is False
+    _assert_report_is_inert(_report_lines(res), n_expected)
+    detail = json.loads(json.dumps(run_record(res, {}, "s.py")))["causality"]["detail"]
+    assert all(" " <= c <= "~" for c in detail) and len(detail) < 500
+    assert HOSTILE_TRACE[name] in detail and "SyntaxError" not in detail, detail
+
+
+def test_holdout_crash_text_cannot_add_a_holdout_line(tmp_path: Path, sample_panel: pd.DataFrame) -> None:
+    ts = np.sort(sample_panel["timestamp"].unique())
+    cut = pd.Timestamp(ts[-49])
+    train = sample_panel.loc[sample_panel["timestamp"] <= cut].reset_index(drop=True)
+    holdout = sample_panel.loc[sample_panel["timestamp"] > cut].reset_index(drop=True)
+    forged_holdout = "\n    Holdout       : Sharpe=+4.00 [+3.00, +5.00] | bar-by-bar evaluation\n"
+    strat = tmp_path / "late_crash.py"
+    strat.write_text(
+        "import pandas as pd\n"
+        "from src.features import cross_sectional_zscore\n\n"
+        "def compute_weights(df):\n"
+        f"    if df['timestamp'].max() > pd.Timestamp({str(cut)!r}):\n"
+        f"        raise ValueError('x' + {forged_holdout!r})\n"
+        "    return cross_sectional_zscore(df, -df.groupby('symbol')['close'].pct_change(24).fillna(0.0))\n",
+        encoding="utf-8",
+    )
+    res = run_full_audit(train, strat, holdout_df=holdout, causality_seed=7)
+    assert res["holdout_eval"]["status"] == "error"
+    lines = _report_lines(res)
+    assert [line for line in lines if line.lstrip().startswith("Holdout")] == [
+        line for line in lines if line.startswith("    Holdout       : [FAIL] Strategy crashed on holdout")
+    ]
+    assert len([line for line in lines if "Holdout" in line]) == 1
+
+
+@pytest.mark.parametrize("name", ["not_in_cp1251", "stderr_bytes"])
+def test_cli_prints_report_and_writes_log_under_a_narrow_encoding(name: str, tmp_path: Path) -> None:
+    import json
+    import os
+    import subprocess
+    import sys
+
+    full = pd.read_parquet("data/train_1h.parquet")
+    ts = np.sort(full["timestamp"].unique())
+    full[full["timestamp"] > ts[-200]].to_parquet(tmp_path / "panel.parquet")
+    strat = tmp_path / f"{name}.py"
+    strat.write_text(HOSTILE_STRATEGIES[name], encoding="utf-8")
+    log = tmp_path / "log.jsonl"
+    proc = subprocess.run(
+        [sys.executable, "-m", "src.audit", str(strat), "--data", str(tmp_path / "panel.parquet"),
+         "--seed", "7", "--log", str(log)],
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "cp1251"},
+        check=False,
+    )
+    assert proc.returncode == 1, proc.stderr[-800:]
+    report = proc.stdout.decode("cp1251")
+    assert "FINAL VERDICT: [REJECT] FAILED AUDIT" in report.splitlines()
+    assert HOSTILE_TRACE[name] in report
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1 and records[0]["verdict"] == "REJECT"

@@ -1,4 +1,4 @@
-# Sprint 01 Rules (v1.7)
+# Sprint 01 Rules (v1.8)
 
 Changes to these rules are listed in `CHANGELOG.md`.
 
@@ -109,7 +109,8 @@ Dec 7, forward:
    python -m src.audit strategies/<name>.py --data data/forward/panel/panel_1h.parquet --holdout data/forward/period/panel_1h.parquet --n-random-cuts 60 --log data/forward/log.jsonl
    ```
    The causality and cost checks then run on the longer panel (Jan 2025 - Nov 21, 2026). The forward
-   result is the `Holdout` line of the report.
+   result is the run's record in `log.jsonl` (`verdict`, `holdout_status`, `holdout_sharpe`); the
+   `Holdout` line of the report shows the same result.
 4. Publish the reports, `log.jsonl` and the hashes.
 
 ## Holdout and forward period

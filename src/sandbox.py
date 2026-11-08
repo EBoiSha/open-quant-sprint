@@ -25,8 +25,31 @@ STREAM_TIMEOUT_SEC = 3600
 CONTAINER_ENV = "OQS_CONTAINER_IMAGE"
 
 
+ERROR_TEXT_LIMIT = 300
+
+
 class StrategyError(RuntimeError):
     pass
+
+
+def safe_text(text: object, limit: int = ERROR_TEXT_LIMIT) -> str:
+    """
+    Text that came from a strategy (an error message, the end of its stderr) as one line of printable
+    ASCII, at most `limit` characters long. The strategy chooses this text, so it must not add lines to
+    the report, carry terminal escape sequences, break the console's encoding or grow without bound.
+    Line breaks become " | "; any other character outside printable ASCII is written as its escape
+    (\\x1b, \\u202e, ...). Applying it twice gives the same result.
+    """
+    try:
+        raw = str(text)
+    except Exception:
+        raw = f"<{type(text).__name__} with an unprintable message>"
+    joined = " | ".join(part.strip() for part in raw.splitlines() if part.strip())
+    out = "".join(c if " " <= c <= "~" else c.encode("unicode_escape").decode("ascii") for c in joined)
+    if len(out) > limit:
+        marker = " ...[truncated]"
+        out = out[: limit - len(marker)] + marker
+    return out
 
 
 def load_module_fn(path: str | Path) -> Callable[[pd.DataFrame], pd.Series]:
@@ -100,12 +123,13 @@ def _run_worker(strategy_path: Path, request: dict, timeout: int) -> tuple[np.nd
         if arr.dtype != np.float64 or arr.ndim != 1:
             raise StrategyError("Worker returned malformed weights")
         return arr, float(elapsed)
+    # The worker runs the strategy's code, so whatever it sends back is strategy-controlled text.
     if payload[:2] == b"ER":
-        raise StrategyError(payload[2:].decode("utf-8", errors="replace"))
+        raise StrategyError(safe_text(payload[2:].decode("utf-8", errors="replace")))
     if proc.returncode == 124:  # the container's own timeout
         raise StrategyError(f"Strategy timed out after {timeout}s")
     tail = proc.stderr.decode("utf-8", errors="replace").strip().splitlines()[-5:]
-    raise StrategyError(f"Strategy process exited with code {proc.returncode}: {' | '.join(tail)}")
+    raise StrategyError(f"Strategy process exited with code {proc.returncode}: {safe_text(' | '.join(tail))}")
 
 
 def isolated_call_timed(strategy_path: str | Path, df: pd.DataFrame) -> tuple[np.ndarray, float]:
@@ -179,7 +203,7 @@ def isolated_stream(strategy_path: str | Path, df: pd.DataFrame, timestamps) -> 
                     out.append(arr)
                     continue
                 if reply is not None and reply[:2] == b"ER":
-                    raise StrategyError(reply[2:].decode("utf-8", errors="replace"))
+                    raise StrategyError(safe_text(reply[2:].decode("utf-8", errors="replace")))
                 if not timer.is_alive():
                     raise StrategyError(f"Strategy timed out after {STREAM_TIMEOUT_SEC}s")
                 proc.wait(timeout=30)
@@ -187,7 +211,7 @@ def isolated_stream(strategy_path: str | Path, df: pd.DataFrame, timestamps) -> 
                     raise StrategyError(f"Strategy timed out after {STREAM_TIMEOUT_SEC}s")
                 err.seek(0)
                 tail = err.read().decode("utf-8", errors="replace").strip().splitlines()[-5:]
-                raise StrategyError(f"Strategy process exited with code {proc.returncode}: {' | '.join(tail)}")
+                raise StrategyError(f"Strategy process exited with code {proc.returncode}: {safe_text(' | '.join(tail))}")
         finally:
             timer.cancel()
             if proc.stdin and not proc.stdin.closed:

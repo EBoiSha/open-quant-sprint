@@ -18,11 +18,11 @@ import pandas as pd
 
 from src.backtest import BacktestMetrics, coerce_weights, run_backtest, tiered_fee_bps
 from src.quality import QualityReport, audit_dataset
-from src.sandbox import CONTAINER_ENV, isolated_call, isolated_call_timed, isolated_stream, load_module_fn, stream_weights
+from src.sandbox import CONTAINER_ENV, isolated_call, isolated_call_timed, isolated_stream, load_module_fn, safe_text, stream_weights
 from src.schema import enforce_schema
 from src.stats import information_coefficient
 
-AUDIT_VERSION = "1.3.1"
+AUDIT_VERSION = "1.3.2"
 
 StrategyFn = Callable[[pd.DataFrame], pd.Series]
 Strategy = StrategyFn | str | Path
@@ -107,13 +107,13 @@ def check_causality_truncation(
         try:
             w_sub = call(sub_df)
         except Exception as exc:
-            return False, float("inf"), f"Strategy crashed on prefix cut at {t_cut}: {exc}"
+            return False, float("inf"), f"Strategy crashed on prefix cut at {t_cut}: {safe_text(exc)}"
 
         if idx == 0:
             try:
                 w_repeat = call(sub_df)
             except Exception as exc:
-                return False, float("inf"), f"Strategy crashed on repeated execution: {exc}"
+                return False, float("inf"), f"Strategy crashed on repeated execution: {safe_text(exc)}"
             det_diff = float(np.max(np.abs(w_sub - w_repeat)))
             if not det_diff <= tol:
                 return False, det_diff, f"Non-deterministic strategy output (diff={det_diff:.3e} on identical input)"
@@ -123,7 +123,7 @@ def check_causality_truncation(
         try:
             full_weights = call(full_df)
         except Exception as exc:
-            return False, float("inf"), f"Strategy crashed during execution: {exc}"
+            return False, float("inf"), f"Strategy crashed during execution: {safe_text(exc)}"
 
     if np.all(np.abs(full_weights) < 1e-12):
         return False, 0.0, "Degenerate signal: strategy produced all-zero weights"
@@ -360,7 +360,7 @@ def evaluate_holdout(
         w_stream = _streamer(strategy)(combined, h_timestamps)
         w_full = _caller(strategy)(combined)[h_mask]
     except Exception as exc:
-        return {"status": "error", "detail": f"Strategy crashed on holdout: {exc}"}
+        return {"status": "error", "detail": f"Strategy crashed on holdout: {safe_text(exc)}"}
 
     if len(w_stream) != int(h_mask.sum()):
         return {"status": "error", "detail": "Holdout weight count mismatch"}
@@ -397,7 +397,7 @@ def run_full_audit(
         return {
             "passed": False,
             "data_quality": dq,
-            "causality": {"passed": False, "max_diff": float("inf"), "detail": f"Strategy execution crashed: {exc}"},
+            "causality": {"passed": False, "max_diff": float("inf"), "detail": f"Strategy execution crashed: {safe_text(exc)}"},
             "ic": {"mean_ic": 0.0, "ic_ir": 0.0, "t_stat": 0.0, "p_value": 1.0, "n_obs": 0},
             "fee_curve": {bps: empty_m for bps in fee_grid_bps},
             "split": {"IS": empty_m, "OOS": empty_m},
@@ -720,10 +720,15 @@ def main() -> int:
         "n_random_cuts": args.n_random_cuts,
         "isolation": f"container {args.container}" if args.container else "host process",
     }
-    print(format_audit_report(res, strategy_path.name, provenance))
+    name = safe_text(strategy_path.name)
+    # The log record is written first, so a report that fails to print cannot cost the run its record.
     if args.log:
         with open(args.log, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(run_record(res, provenance, strategy_path.name)) + "\n")
+            fh.write(json.dumps(run_record(res, provenance, name)) + "\n")
+    if hasattr(sys.stdout, "reconfigure"):
+        # A console or file encoding such as cp1251 must not stop the report from printing.
+        sys.stdout.reconfigure(errors="backslashreplace")
+    print(format_audit_report(res, name, provenance))
     return 0 if res["passed"] else 1
 
 

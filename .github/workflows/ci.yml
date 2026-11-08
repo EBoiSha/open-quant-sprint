@@ -56,6 +56,16 @@ jobs:
 
       - name: Audit strategies
         run: |
+          # The report holds text chosen by the strategy. Workflow commands in it (lines starting with
+          # "::") must not reach the runner, so the log copy goes out between stop-commands markers made
+          # after the audit has finished; the summary copy is HTML-escaped so nothing in it renders.
+          show_report() {
+            token=$(python -c "import secrets; print(secrets.token_hex(16))")
+            echo "::stop-commands::$token"
+            cat audit_report.txt
+            echo "::$token::"
+            python -c "import html; print('<pre>' + html.escape(open('audit_report.txt', encoding='utf-8', errors='replace').read()) + '</pre>')" >> "$GITHUB_STEP_SUMMARY"
+          }
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             if [ -f "$RUNNER_TEMP/pr_strategies.txt" ]; then
               files=$(cat "$RUNNER_TEMP/pr_strategies.txt")
@@ -68,13 +78,10 @@ jobs:
           status=0
           for f in $files; do
             echo "### $f" >> "$GITHUB_STEP_SUMMARY"
-            echo '```text' >> "$GITHUB_STEP_SUMMARY"
             rc=0
             python -m src.audit "$f" > audit_report.txt 2>&1 || rc=$?
-            cat audit_report.txt
-            cat audit_report.txt >> "$GITHUB_STEP_SUMMARY"
+            show_report
             if [ "$rc" -ne 0 ]; then status=1; fi
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
           done
           if [ -z "$files" ]; then echo "No contributed strategy files to audit." >> "$GITHUB_STEP_SUMMARY"; fi
           if [ "${{ github.event_name }}" != "pull_request" ]; then
@@ -87,12 +94,19 @@ jobs:
       - name: Reference audit of baseline_flow.py (informational)
         if: github.event_name == 'push'
         run: |
+          # The report holds text chosen by the strategy. Workflow commands in it (lines starting with
+          # "::") must not reach the runner, so the log copy goes out between stop-commands markers made
+          # after the audit has finished; the summary copy is HTML-escaped so nothing in it renders.
+          show_report() {
+            token=$(python -c "import secrets; print(secrets.token_hex(16))")
+            echo "::stop-commands::$token"
+            cat audit_report.txt
+            echo "::$token::"
+            python -c "import html; print('<pre>' + html.escape(open('audit_report.txt', encoding='utf-8', errors='replace').read()) + '</pre>')" >> "$GITHUB_STEP_SUMMARY"
+          }
           echo "### strategies/baseline_flow.py (reference, does not gate CI)" >> "$GITHUB_STEP_SUMMARY"
-          echo '```text' >> "$GITHUB_STEP_SUMMARY"
           python -m src.audit strategies/baseline_flow.py > audit_report.txt 2>&1 || true
-          cat audit_report.txt
-          cat audit_report.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          show_report
 
   container:
     name: Strategy sandbox isolation (Docker)

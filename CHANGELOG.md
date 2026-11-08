@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.8 (2026-11-08)
+
+Audit (audit version 1.3.2). Reported privately by Yousof.
+- Text that comes back from the strategy process (an error message, the end of its stderr, anything
+  the process writes as its result) is now one line of printable ASCII, at most 300 characters, before
+  it goes into the report or the `--log` record. Line breaks become " | " and any other character is
+  escaped. Before, a strategy could add lines of its own to the report, for example a second
+  `FINAL VERDICT` or a `Holdout` line, and close the code block of the CI job summary. The verdict, the
+  exit code and the `verdict` field of `--log` were not affected.
+- The `--log` record is written before the report is printed, and printing no longer fails on a
+  console or file encoding that cannot show a character (such as cp1251 on Windows). Before, a single
+  such character in an error message left the run with no report and no log record.
+- CI prints each report with workflow commands off and writes it to the job summary HTML-escaped.
+
+Rules and documentation
+- `RULES.md`: the forward result is the run's record in `log.jsonl`; the report's `Holdout` line shows
+  the same result.
+- `LIMITATIONS.md` describes the gap and what changed.
+
 ## v1.7 (2026-11-02)
 
 Rules and documentation (audit unchanged, version 1.3.1)
