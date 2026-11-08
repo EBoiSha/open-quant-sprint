@@ -1,0 +1,37 @@
+========================================================================
+SYNDICATE AUDIT REPORT :: baseline_flow.py
+========================================================================
+[1] DATA QUALITY     : DQS=99.93/100 (READY) | rows=69120 | symbols=20 | gaps=0 | funding_irreg=0
+[2] CAUSALITY CHECK  : [PASS] Causal invariance verified across 3 prefix cuts (max diff=0.00e+00)
+[3] RANK IC (1h fwd) : mean=+0.00152 | IC_IR=+0.006 | t=+0.34 (p=0.7298)
+[4] RUNTIME          : 89.7 ms (770,682 rows/sec)
+------------------------------------------------------------------------
+[5] TRANSACTION COST DECAY MATRIX (1-bar lag + funding included):
+    Fee (bps)      Sharpe   DSR(N=10)    Ann.Ret    Ann.Vol     MaxDD   Turnover
+       0.0 bps      +4.48       0.983    +74.63%     16.67%    -6.12%     0.0504
+       3.0 bps      +3.68       0.948    +61.38%     16.67%    -6.89%     0.0504
+       5.0 bps      +3.15       0.901    +52.54%     16.67%    -8.15%     0.0504
+      10.0 bps      +1.83       0.673    +30.46%     16.67%   -11.38%     0.0504
+------------------------------------------------------------------------
+[6] PURGED SPLIT (70% In-Sample / 24h Embargo / 30% Out-of-Sample @ 5.0 bps):
+    In-Sample     : Sharpe=+2.98 | DSR=0.838 | Ann.Ret=+50.48% | MaxDD=-8.15%
+    Out-of-Sample : Sharpe=+4.19 | DSR=0.853 | Ann.Ret=+67.41% | MaxDD=-3.72%
+------------------------------------------------------------------------
+[7] LAG SENSITIVITY TEST (+1 extra bar execution lag @ 5.0 bps):
+    1-bar lag SR  : +3.15 | 2-bar lag SR: +3.14 | Retention: 99.7% [PASS]
+[8] NULL HYPOTHESIS TEST (shuffled returns permutation):
+    Permuted SR   : -0.20 (hurdle |SR| < 0.75) [PASS - immune to pipeline noise]
+[9] FRICTION DRAG BREAKDOWN (@ 5.0 bps taker fee):
+    Gross PnL     : +29.42%
+    Fee Cost      : +8.71%
+    Funding Drag  : -0.03%
+    Net PnL       : +20.73%
+[10] WICK & MARK INTEGRITY (liquidation wick / bad mark hurdle <= 20.0%):
+    Wick PnL Share: 2.4% (538 anomaly bars) [PASS - structural flow]
+------------------------------------------------------------------------
+[11] EXECUTION REALISM & MODEL BOUNDARIES:
+    Assumptions   : 1-bar execution delay (t+1), Close-to-Close fills, snapshot funding, 5 bps taker fee
+    Scope Caveat  : Excludes orderbook queueing, depth-scaled impact (Almgren-Chriss), & adverse selection
+========================================================================
+FINAL VERDICT: [PASS] SURVIVED AUDIT
+========================================================================

@@ -1,0 +1,45 @@
+========================================================================
+SYNDICATE AUDIT REPORT :: crashing_example.py
+========================================================================
+    audit v1.3.1 | commit f9c2892 | strategy sha256 5f622143d4d316cb
+    data sha256 d68e6159bbdfb2e3
+    causality seed 20261107 | random cuts 8 (reproduce with --seed 20261107)
+    strategy process: host process
+[1] DATA QUALITY     : DQS=99.93/100 (READY) | rows=297420 | symbols=20 | gaps=0 | funding_irreg=0
+[2] CAUSALITY CHECK  : [FAIL] Strategy execution crashed: ValueError: feature window of 5000 bars is longer than the panel
+[3] RANK IC (1h fwd) : mean=+0.00000 | IC_IR=+0.000 | t=+0.00 (p=1.0000)
+[4] RUNTIME          : 0.0 ms (0 rows/sec)
+------------------------------------------------------------------------
+[5] TRANSACTION COST DECAY MATRIX (1-bar lag + funding included):
+    Fee (bps)      Sharpe     95% CI (block bootstrap)  DSR(N=10)   Ann.Ret     MaxDD  Turnover
+       0.0 bps      +0.00                          n/a      0.000    +0.00%    +0.00%    0.0000
+       3.0 bps      +0.00                          n/a      0.000    +0.00%    +0.00%    0.0000
+       5.0 bps      +0.00                          n/a      0.000    +0.00%    +0.00%    0.0000
+      10.0 bps      +0.00                          n/a      0.000    +0.00%    +0.00%    0.0000
+    tiered = BTC/ETH 5 bps, 6 least liquid by trailing 30d volume 10 bps, others 7 bps
+------------------------------------------------------------------------
+[6] PURGED SPLIT (70% In-Sample / 24h Embargo / 30% Out-of-Sample @ 5.0 bps):
+    In-Sample     : Sharpe=+0.00 n/a | DSR=0.000 | Ann.Ret=+0.00% | MaxDD=+0.00%
+    Out-of-Sample : Sharpe=+0.00 n/a | DSR=0.000 | Ann.Ret=+0.00% | MaxDD=+0.00%
+------------------------------------------------------------------------
+[7] LAG SENSITIVITY TEST (+1 extra bar execution lag @ 5.0 bps):
+    1-bar lag SR  : +0.00 | 2-bar lag SR: +0.00 | Retention: 0.0% [FAIL - lookahead leak]
+[8] NULL PIPELINE CHECK (0 daily-block permutations of returns):
+    Null SR mean  : +0.00 (sd 0.00, hurdle |mean| < 0.75) [FAIL - static tilt or pipeline artifact]
+    Gross SR vs null: p=1.0000 (in-sample, informational only)
+[9] FRICTION DRAG BREAKDOWN (@ 5.0 bps taker fee):
+    Gross PnL     : +0.00%
+    Fee Cost      : +0.00%
+    Funding Drag  : +0.00%
+    Net PnL       : +0.00%
+[10] WICK & MARK INTEGRITY (liquidation wick / bad mark hurdle <= 20.0%):
+    Wick PnL Share: 100.0% (0 anomaly bars) [FAIL - bad mark exploitation]
+------------------------------------------------------------------------
+[11] EXECUTION REALISM & MODEL BOUNDARIES:
+    Fills         : signal on the close of bar t, filled at that close; lag-2 test = one hour of real delay
+    Costs         : flat taker fee grid + tiered row, snapshot funding on the position held across settlement
+    Scope Caveat  : Excludes orderbook queueing, depth-scaled impact (Almgren-Chriss), & adverse selection
+[13] REVIEW FLAGS   : none (manual review, not part of the verdict)
+========================================================================
+FINAL VERDICT: [REJECT] FAILED AUDIT
+========================================================================
