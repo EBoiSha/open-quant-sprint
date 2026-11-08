@@ -34,6 +34,9 @@ Checks beyond the Issue, and what each is for:
   warning. ``data/build_dataset.py`` writes 0 when the funding
   download comes back empty, so a failed download reads as free
   funding.
+- Zero volume in every bar of a symbol, as a warning. It is valid
+  OHLC, so ``audit_dataset`` passes it; over a whole file it more
+  likely means a failed download (a note in the review of #11).
 - A first open more than 5 % from the symbol's last close in the
   panel, as a warning. A redenominated contract (PEPE -> 1000PEPE)
   keeps its place in the keys but not its prices, and the return
@@ -121,6 +124,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 
@@ -134,6 +138,7 @@ FUNDING_EPS = 1e-9  # same threshold as src/quality.py
 DQS_MIN = 80.0  # the audit's data quality gate (src/audit.py)
 SEAM_JUMP = 0.05  # first open vs. last close: a different contract?
 SILENT_FUNDING_MIN = 3  # settlement hours before all-zero is flagged
+SILENT_VOLUME_MIN = 3  # bars before all-zero volume is flagged
 MAX_EXAMPLES = 5
 
 
@@ -167,6 +172,7 @@ def check_continuation(
             errors += _unclosed_errors(new, as_of)
         errors += _quality_errors(new)
         warnings += _funding_warnings(on_grid)
+        warnings += _volume_warnings(on_grid)
     lines = [f"error: {msg}" for msg in errors]
     lines += [f"warning: {msg}" for msg in warnings]
     return lines
@@ -398,7 +404,10 @@ def _unclosed_errors(new: pd.DataFrame, as_of: pd.Timestamp) -> list[str]:
     A bar opening at t closes at t + 1h, so no bar may open later than
     ``as_of`` minus one hour.
     """
-    cutoff = _utc(as_of) - HOUR
+    try:
+        cutoff = _utc(as_of) - HOUR
+    except (ValueError, TypeError):
+        cutoff = pd.NaT
     if pd.isna(cutoff):
         return ["as_of is not a time, so unclosed bars were not checked"]
     late = new.loc[new["timestamp"] > cutoff]
@@ -409,6 +418,25 @@ def _unclosed_errors(new: pd.DataFrame, as_of: pd.Timestamp) -> list[str]:
         "one hour), so they had not closed at download time: bars at "
         f"{_hours(late['timestamp'])} UTC, "
         f"{late['symbol'].nunique()} symbols"
+    ]
+
+
+def _volume_warnings(on_grid: pd.DataFrame) -> list[str]:
+    """Symbols with zero volume in every bar of ``new``.
+
+    Zero volume is valid OHLC, so neither the errors here nor
+    ``audit_dataset`` catch it; over a whole file it more likely means
+    a failed download than a quiet market.
+    """
+    traded = on_grid["volume"] > 0
+    counts = traded.groupby(on_grid["symbol"]).agg(["any", "size"])
+    quiet = ~counts["any"] & (counts["size"] >= SILENT_VOLUME_MIN)
+    silent = sorted(counts.index[quiet])
+    if not silent:
+        return []
+    return [
+        f"volume is zero in every bar for {', '.join(silent)}; did the "
+        "download fail?"
     ]
 
 
@@ -482,6 +510,8 @@ _HEADER = "SYNDICATE AUDIT REPORT ::"
 # message is part of the causality or holdout line, so anything inside a
 # line can be its text.
 _CAUSALITY = r"^\s*(?:\[\d+\]\s*)?CAUSALITY CHECK\s*:"
+_DATA_QUALITY = r"^\s*(?:\[\d+\]\s*)?DATA QUALITY\s*:"
+_VERSION = r"^\s*audit v(\d[0-9A-Za-z.+-]*)"
 _HOLDOUT = r"^\s*Holdout(?: Vault)?\s*:"
 _CRASHED = r"Strategy (?:execution )?crashed"
 _HEX = r"[0-9a-f]{8,64}"
@@ -491,7 +521,8 @@ _TAG = r"\[(PASS|FAIL)\b[^\]]*\]"
 
 Interval = tuple[float, float]
 Row = tuple[str, bool | None, str]  # label, result, value
-DataFiles = dict[str, tuple[str, "str | None"]]  # role: (path, hash)
+Role = Literal["panel", "holdout"]
+DataFiles = dict[Role, tuple[str, str | None]]  # role: (path, hash)
 
 
 @dataclass
@@ -554,15 +585,30 @@ def split_reports(text: str) -> list[str]:
     A report starts at its "SYNDICATE AUDIT REPORT ::" line, or at the
     rule of "=" above it; text before the first report stays with it.
     A text without such a line is one piece, an empty text none.
+
+    Before audit 1.3.2 a strategy's error message could hold such a
+    line too, with a forged verdict above it. So in a report of that
+    age, a header below an error message starts no new piece; it stays
+    in the report and is not read (``_Lines.withhold_strategy_text``).
     """
     if not text.strip():
         return []
     lines = text.splitlines()
-    starts = [
-        i - 1 if i > 0 and set(lines[i - 1].strip()) == {"="} else i
-        for i, line in enumerate(lines)
-        if line.lstrip().startswith(_HEADER)
-    ]
+    starts: list[int] = []
+    head, legacy, crashed = True, True, False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(_HEADER):
+            if legacy and crashed:
+                continue
+            rule = i > 0 and set(lines[i - 1].strip()) == {"="}
+            starts.append(i - 1 if rule else i)
+            head, legacy, crashed = True, True, False
+        elif head and re.search(_DATA_QUALITY, line):
+            head = False
+        elif head and (version := re.match(_VERSION, line)):
+            legacy = _version_key(version[1]) < ONE_LINE_ERRORS
+        elif re.search(f"{_CAUSALITY}|{_HOLDOUT}", line):
+            crashed = crashed or bool(re.search(_CRASHED, line))
     cuts = [0] + starts[1:] + [len(lines)]
     return ["\n".join(lines[a:b]) for a, b in zip(cuts, cuts[1:])]
 
@@ -633,8 +679,7 @@ class _Lines:
         lines below the first causality or holdout line with an error
         message are not read.
         """
-        numbers = re.findall(r"\d+", version or "")
-        if tuple(int(n) for n in numbers[:3]) >= ONE_LINE_ERRORS:
+        if _version_key(version) >= ONE_LINE_ERRORS:
             return
         for i, line in enumerate(self.lines):
             if re.search(f"{_CAUSALITY}|{_HOLDOUT}", line) and re.search(
@@ -642,7 +687,20 @@ class _Lines:
             ):
                 self.withheld = self.lines[i + 1:]
                 self.lines = self.lines[: i + 1]
-                return
+                break
+        if any(ln.lstrip().startswith(_HEADER) for ln in self.withheld):
+            self.problems.append(
+                "a report header below the strategy's error message is "
+                "not read as a report: before audit 1.3.2 it can be the "
+                "strategy's text"
+            )
+
+    def head(self) -> list[str]:
+        """The lines above the data quality line: header, provenance."""
+        for i, line in enumerate(self.lines):
+            if re.search(_DATA_QUALITY, line):
+                return self.lines[:i]
+        return self.lines
 
     def find(
         self,
@@ -707,6 +765,11 @@ class _Lines:
             self.problems.append(f"unparseable: {what}{tail}")
 
 
+def _version_key(version: str | None) -> tuple[int, ...]:
+    """``version`` as numbers to compare, () for none."""
+    return tuple(int(n) for n in re.findall(r"\d+", version or "")[:3])
+
+
 def _interval(text: str) -> Interval | None:
     if text == "n/a":
         return (math.nan, math.nan)
@@ -723,8 +786,11 @@ def _read_head(lines: _Lines, s: AuditSummary) -> None:
     if found:
         s.strategy = found[1]
 
-    line = lines.find_optional(r"^\s*audit v")
-    found = lines.match("audit version", line, r"audit v(\d[0-9A-Za-z.+-]*)")
+    # Provenance comes above the data quality line; anything below it
+    # could be a strategy's text in a report before 1.3.2.
+    head = lines.head()
+    line = next((ln for ln in head if re.search(r"^\s*audit v", ln)), None)
+    found = lines.match("audit version", line, _VERSION)
     if line is None:
         lines.problems.append(
             "missing: audit version (no 'audit v...' line); the report "
@@ -744,7 +810,11 @@ def _read_head(lines: _Lines, s: AuditSummary) -> None:
         sha = re.search(rf"\bstrategy sha256 ({_HEX})\b", line)
         s.strategy_sha256 = sha[1] if sha else None
         what = "data sha256"
-        line = lines.find(what, what, r"^\s*data sha256\b")
+        line = next(
+            (ln for ln in head if re.search(r"^\s*data sha256\b", ln)), None
+        )
+        if line is None:
+            lines.problems.append(f"missing: {what} (no {what!r} line)")
         found = lines.match(what, line, rf"\bdata sha256 ({_HEX})\b")
         if found:
             s.data_sha256 = found[1]
@@ -761,8 +831,7 @@ def _read_head(lines: _Lines, s: AuditSummary) -> None:
 
 def _read_checks(lines: _Lines, s: AuditSummary) -> None:
     """Data quality, causality, lag test, null check and wick share."""
-    anchor = r"^\s*(?:\[\d+\]\s*)?DATA QUALITY\s*:"
-    line = lines.find("data quality", "DATA QUALITY", anchor)
+    line = lines.find("data quality", "DATA QUALITY", _DATA_QUALITY)
     s.dqs = lines.number("data quality score", line, rf"DQS=({_NUM})/")
 
     what = "causality check"
@@ -880,7 +949,7 @@ def audit_table(
     ("panel", "holdout"): their path and hash, from ``file_hash``.
     They name the data where the report does not, as when the audit
     stopped before its report, and are checked against the hashes the
-    report prints.
+    report prints. Another role raises ValueError.
     """
     s = summary
     files = files or {}
@@ -925,7 +994,13 @@ def _data(s: AuditSummary, files: DataFiles) -> tuple[str, list[str]]:
     """The data a run used, and notes where report and files differ.
 
     The report prints hashes; a path is known only from the caller.
+    Hashes of different length are compared on the shorter one.
     """
+    unknown = sorted(set(files) - {"panel", "holdout"})
+    if unknown:
+        raise ValueError(
+            f"unknown roles in files: {unknown}; use 'panel' or 'holdout'"
+        )
     parts, notes = [], []
     printed = {"panel": s.data_sha256, "holdout": s.holdout_sha256}
     for role, sha in printed.items():
@@ -943,7 +1018,7 @@ def _data(s: AuditSummary, files: DataFiles) -> tuple[str, list[str]]:
                 f"The report names no {role}, but {_code(path)} was given "
                 f"as its {role}."
             )
-        elif file_sha and file_sha != sha:
+        elif file_sha and file_sha[: len(sha)] != sha[: len(file_sha)]:
             notes.append(
                 f"The report was made on {role} {_code(sha)}, but "
                 f"{_code(path)} is {_code(file_sha)}: not the same data."

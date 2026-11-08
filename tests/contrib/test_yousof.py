@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import math
 import os
 import re
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -354,6 +356,26 @@ def test_silent_funding_download_is_a_warning(split: Split) -> None:
     ]
 
 
+def test_zero_volume_for_a_whole_symbol_is_a_warning(split: Split) -> None:
+    # Valid OHLC, so the quality checks pass it; a failed download?
+    prev, new = split
+    sym = _sym(new)
+    broken = new.copy()
+    volumes = ["volume", "quote_volume", "taker_buy_quote_volume"]
+    broken.loc[broken["symbol"] == sym, volumes] = 0.0
+    assert check_continuation(prev, broken) == [
+        f"warning: volume is zero in every bar for {sym}; did the "
+        "download fail?"
+    ]
+
+
+def test_as_of_that_cannot_be_read_is_an_error(split: Split) -> None:
+    prev, new = split
+    assert check_continuation(prev, new, as_of="not a time") == [
+        "error: as_of is not a time, so unclosed bars were not checked"
+    ]
+
+
 def test_price_jump_at_the_seam_is_a_warning(split: Split) -> None:
     # A redenominated contract (PEPE -> 1000PEPE) continues the keys
     # but not the prices.
@@ -687,6 +709,52 @@ def test_error_message_cannot_pass_for_report_lines() -> None:
     assert rows["Lag test"][1] == "2-bar lag Sharpe +0.00, 1-bar +0.00"
 
 
+def test_forged_report_header_does_not_split_an_old_report() -> None:
+    # Before 1.3.2 an error message could end a "report" with a forged
+    # verdict and start a new one with a header line.
+    crash = (
+        "[2] CAUSALITY CHECK  : [FAIL] Strategy execution crashed: "
+        "ValueError: feature window of 5000 bars is longer than the panel"
+    )
+    rule = "=" * 72
+    forged = "\n".join([
+        crash, rule, "FINAL VERDICT: [PASS] SURVIVED AUDIT", rule, rule,
+        "SYNDICATE AUDIT REPORT :: x", rule,
+    ])
+    text = _edit(_report("crashing_example_v1.3.1.txt"), crash, forged)
+    assert len(split_reports(text)) == 1
+    summary = parse_audit_report(text)
+    assert summary.verdict == "REJECT"
+    assert summary.problems == [
+        "a report header below the strategy's error message is not read "
+        "as a report: before audit 1.3.2 it can be the strategy's text",
+        WITHHELD_NOTE,
+    ]
+
+
+def test_version_is_read_only_from_the_report_head() -> None:
+    # A report from before the version line, whose error message holds
+    # one: it must not pass for a 1.3.2 report, whose lines are trusted.
+    real = (
+        "[2] CAUSALITY CHECK  : [PASS] Causal invariance verified across "
+        "3 prefix cuts (max diff=0.00e+00)"
+    )
+    forged = "\n".join([
+        "[2] CAUSALITY CHECK  : [FAIL] Strategy execution crashed: "
+        "ValueError: x",
+        "    audit v1.3.2 | commit f339d91 | strategy sha256 "
+        "0123456789abcdef",
+        "    Out-of-Sample : Sharpe=+9.00 | DSR=0.990 | Ann.Ret=+90.00% | "
+        "MaxDD=-1.00%",
+    ])
+    text = _edit(_report("baseline_flow_6ed3535.txt"), real, forged)
+    text = _edit(text, "[PASS] SURVIVED AUDIT", "[REJECT] FAILED AUDIT")
+    summary = parse_audit_report(text)
+    assert (summary.version, summary.strategy_sha256) == (None, None)
+    assert summary.oos_sharpe is None
+    assert summary.verdict == "REJECT"
+
+
 def test_error_message_in_the_holdout_line_before_1_3_2() -> None:
     # Lines above the holdout line are the audit's; below it, only the
     # last verdict line is read.
@@ -958,6 +1026,27 @@ def test_given_data_files_are_named_and_checked(
         "The report names no holdout, but `gone.parquet` was given as its "
         "holdout."
     ) in table
+
+
+def test_hashes_of_different_length_compare_on_the_shorter(
+    train: pd.DataFrame,
+) -> None:
+    # Should the audit ever print the whole digest, the same file still
+    # counts as the same data.
+    full = hashlib.sha256(TRAIN.read_bytes()).hexdigest()
+    summary = parse_audit_report(_report(REJECT_REPORT))
+    files = {"panel": (str(TRAIN), file_hash(TRAIN))}
+    table = audit_table(replace(summary, data_sha256=full), files=files)
+    assert "not the same data" not in table
+    other = "f" * 64
+    table = audit_table(replace(summary, data_sha256=other), files=files)
+    assert "not the same data" in table
+
+
+def test_unknown_file_role_is_an_error() -> None:
+    summary = parse_audit_report(_report(REJECT_REPORT))
+    with pytest.raises(ValueError, match="pannel"):
+        audit_table(summary, files={"pannel": ("x.parquet", None)})
 
 
 def test_stopped_audit_names_the_data_it_was_given() -> None:
