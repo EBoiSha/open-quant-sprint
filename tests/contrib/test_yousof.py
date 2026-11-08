@@ -1065,6 +1065,51 @@ def test_stopped_audit_names_the_data_it_was_given() -> None:
     ]
 
 
+def test_live_audit_that_stops_names_its_data(
+    train: pd.DataFrame, tmp_path: Path
+) -> None:
+    # The real audit on a holdout that starts an hour late, made from
+    # the training panel: it stops before its report (exit code 2) and
+    # its error line names no file. Run the way CI runs it (2>&1), the
+    # table names the files the run was given, and checks the line of
+    # the current audit version, not only a saved one.
+    repo = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "PYTHONPATH": str(repo)}
+    cut = train["timestamp"].max() - (NEW_HOURS - 1) * HOUR
+    train.loc[train["timestamp"] < cut].to_parquet(tmp_path / "panel.pq")
+    train.loc[train["timestamp"] > cut].to_parquet(tmp_path / "late.pq")
+    files = ["--data", "panel.pq", "--holdout", "late.pq"]
+    strategy = str(repo / "strategies" / "baseline_flow.py")
+    audit = subprocess.run(
+        [sys.executable, "-m", "src.audit", strategy, *files],
+        capture_output=True, text=True, timeout=120, check=False,
+        cwd=tmp_path, env=env,
+    )
+    assert audit.returncode == 2
+    (tmp_path / "baseline_flow.txt").write_text(audit.stdout + audit.stderr)
+    done = subprocess.run(
+        [sys.executable, "-m", "src.contrib.yousof", *files,
+         "baseline_flow.txt"],
+        capture_output=True, text=True, timeout=60, check=False,
+        cwd=tmp_path, env=env,
+    )
+    assert done.returncode == 0, done.stderr
+    panel = file_hash(tmp_path / "panel.pq")
+    late = file_hash(tmp_path / "late.pq")
+    error = (
+        f"Error: holdout starts at {cut + HOUR}, expected {cut}, one hour "
+        "after the --data panel ends."
+    )
+    assert done.stdout.splitlines() == [
+        "#### `baseline_flow`",
+        "",
+        f"Run with panel `panel.pq` (`{panel}`), holdout `late.pq` "
+        f"(`{late}`).",
+        "",
+        f"- `no audit report in the text, which starts with {error!r}`",
+    ]
+
+
 def test_command_line_with_data_files(
     train: pd.DataFrame, capsys: pytest.CaptureFixture[str]
 ) -> None:

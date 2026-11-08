@@ -35,6 +35,8 @@ The last three runs use data files that are not in the repository (Binance terms
   `data/train_1h.parquet` without a gap.
 - Holdout one hour late: the same file without its first hour, SHA-256 62cd580c5a46df39. The audit
   stops before the report, with the error line saved here (stderr, as CI captures it with `2>&1`).
+  The same case also runs live in `test_live_audit_that_stops_names_its_data`, built from
+  `data/train_1h.parquet`, so the error line of the current audit version is checked too.
 - Low-quality panel: the last 120 days of `data/train_1h.parquet` with `high` set to 0.99 times `low`
   in 2 % of the rows (random rows, seed 20261107), SHA-256 2307dc25d97bd97a. Its quality score is
   74.92; every other check passes.
