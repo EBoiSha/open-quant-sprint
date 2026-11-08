@@ -75,12 +75,17 @@ jobs:
           else
             files=$(ls strategies/*.py | grep -v -e template.py -e leaky_example.py -e baseline_flow.py || true)
           fi
+          reports="$RUNNER_TEMP/audit_reports"
+          mkdir -p "$reports"
           status=0
           for f in $files; do
             echo "### $f" >> "$GITHUB_STEP_SUMMARY"
             rc=0
             python -m src.audit "$f" > audit_report.txt 2>&1 || rc=$?
+            printf '<details><summary>Raw audit report</summary>\n\n' >> "$GITHUB_STEP_SUMMARY"
             show_report
+            printf '</details>\n\n' >> "$GITHUB_STEP_SUMMARY"
+            cp audit_report.txt "$reports/$(basename "$f" .py).txt"
             if [ "$rc" -ne 0 ]; then status=1; fi
           done
           if [ -z "$files" ]; then echo "No contributed strategy files to audit." >> "$GITHUB_STEP_SUMMARY"; fi
@@ -106,7 +111,29 @@ jobs:
           }
           echo "### strategies/baseline_flow.py (reference, does not gate CI)" >> "$GITHUB_STEP_SUMMARY"
           python -m src.audit strategies/baseline_flow.py > audit_report.txt 2>&1 || true
+          printf '<details><summary>Raw audit report</summary>\n\n' >> "$GITHUB_STEP_SUMMARY"
           show_report
+          printf '</details>\n\n' >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/audit_reports"
+          cp audit_report.txt "$RUNNER_TEMP/audit_reports/baseline_flow.txt"
+
+      - name: Audit summary table
+        # The audit step exits 1 on REJECT; the table is wanted then most.
+        if: always()
+        continue-on-error: true
+        run: |
+          reports="$RUNNER_TEMP/audit_reports"
+          if ! ls "$reports"/*.txt > /dev/null 2>&1; then exit 0; fi
+          # The parser as on main: a pull request may change contrib files.
+          parser="$RUNNER_TEMP/audit_table.py"
+          git show origin/main:src/contrib/yousof.py > "$parser" 2>/dev/null || true
+          grep -q '^def audit_table' "$parser" || cp src/contrib/yousof.py "$parser"
+          echo "### Audit summary" >> "$GITHUB_STEP_SUMMARY"
+          if ! grep -q '^def audit_table' "$parser"; then
+            echo "No table: the parser is not on main yet." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          PYTHONPATH="$GITHUB_WORKSPACE" python "$parser" "$reports"/*.txt >> "$GITHUB_STEP_SUMMARY"
 
   container:
     name: Strategy sandbox isolation (Docker)
