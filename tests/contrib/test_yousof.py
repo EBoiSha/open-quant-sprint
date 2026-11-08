@@ -12,13 +12,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.audit import holdout_start_problem
+from src.audit import _sha256, holdout_start_problem
 from src.contrib.yousof import (
     CHECKED_VERSIONS,
     DQS_MIN,
     AuditSummary,
     audit_table,
     check_continuation,
+    file_hash,
     main,
     parse_audit_report,
     split_reports,
@@ -384,6 +385,8 @@ CAUSAL_14 = (
     "Causal invariance verified across 14 prefix cuts "
     "(max diff=0.00e+00, seed=20261107)"
 )
+TRAIN_SHA = "d68e6159bbdfb2e3"  # data/train_1h.parquet, as the audit prints
+FORGING_SHA = "b95f1fc02841b1f2"
 WITHHELD_NOTE = (
     "not read, as they come below a strategy's error message, which "
     "before audit 1.3.2 could add lines of its own: lag test, null check, "
@@ -398,6 +401,7 @@ VERSION_NOTE = (
 # are None, problems [].
 BASELINE = dict(
     strategy="baseline_flow.py", version="1.3.1", commit="f9c2892",
+    strategy_sha256="d92db270a5952c37", data_sha256=TRAIN_SHA,
     verdict="REJECT", causality_passed=True, causality_detail=CAUSAL_14,
     dqs=99.93, sharpe_5bps=-1.53, sharpe_5bps_ci=(-3.00, 0.07),
     turnover_5bps=0.0522, oos_sharpe=2.17, oos_sharpe_ci=(-0.52, 4.86),
@@ -407,6 +411,7 @@ BASELINE = dict(
 )
 LEAKY = dict(
     strategy="leaky_example.py", version="1.3.1", commit="f9c2892",
+    strategy_sha256="dd9387fbb6752cb7", data_sha256=TRAIN_SHA,
     verdict="REJECT", causality_passed=False,
     causality_detail="Look-ahead leak detected at 2025-07-13 "
     "13:00:00+00:00: max|w_trunc - w_full| = 3.644e+00 > 1.0e-09 "
@@ -430,13 +435,15 @@ EXPECTED: dict[str, dict] = {
     "leaky_example_v1.3.1.txt": LEAKY,
     # The same run with the official holdout window: one more line.
     "leaky_example_holdout_v1.3.1.txt": {
-        **LEAKY, "holdout_passed": False,
+        **LEAKY, "holdout_sha256": "e11b641dfdded82f",
+        "holdout_passed": False,
         "holdout_detail": "Holdout look-ahead: one-shot weights differ "
         "from bar-by-bar weights (max diff=9.912e-02)",
     },
     # Every check passes but data quality.
     "baseline_flow_low_dqs_v1.3.1.txt": dict(
         strategy="baseline_flow.py", version="1.3.1", commit="f9c2892",
+        strategy_sha256="d92db270a5952c37", data_sha256="2307dc25d97bd97a",
         verdict="REJECT", causality_passed=True,
         causality_detail="Causal invariance verified across 13 prefix "
         "cuts (max diff=0.00e+00, seed=20261107)",
@@ -456,6 +463,7 @@ EXPECTED: dict[str, dict] = {
     # below the message is read but the last verdict line.
     "forging_example_v1.3.1.txt": dict(
         strategy="forging_example.py", version="1.3.1", commit="f9c2892",
+        strategy_sha256=FORGING_SHA, data_sha256=TRAIN_SHA,
         verdict="REJECT", causality_passed=False,
         causality_detail="Strategy execution crashed: ValueError: bad "
         "window",
@@ -466,6 +474,7 @@ EXPECTED: dict[str, dict] = {
     # lines below it are the audit's own.
     "forging_example_v1.3.2.txt": dict(
         strategy="forging_example.py", version="1.3.2", commit="f339d91",
+        strategy_sha256=FORGING_SHA, data_sha256=TRAIN_SHA,
         verdict="REJECT", causality_passed=False,
         causality_detail="Strategy execution crashed: ValueError: bad "
         "window | Wick PnL Share: 0.1% (1 anomaly bars) [PASS - structural "
@@ -490,6 +499,8 @@ EXPECTED: dict[str, dict] = {
     ),
     PASS_REPORT: dict(
         strategy="baseline_flow.py", version="1.3.1", commit="f9c2892",
+        strategy_sha256="d92db270a5952c37", data_sha256="9abe5f927a377922",
+        holdout_sha256="cda6fb82ac1a69ac",
         verdict="PASS", causality_passed=True, causality_detail=CAUSAL_14,
         dqs=99.95, sharpe_5bps=1.45, sharpe_5bps_ci=(-1.27, 4.15),
         turnover_5bps=0.0513, oos_sharpe=0.36, oos_sharpe_ci=(-4.66, 6.02),
@@ -501,6 +512,7 @@ EXPECTED: dict[str, dict] = {
     ),
     "crashing_example_v1.3.1.txt": dict(
         strategy="crashing_example.py", version="1.3.1", commit="f9c2892",
+        strategy_sha256="5f622143d4d316cb", data_sha256=TRAIN_SHA,
         verdict="REJECT", causality_passed=False,
         causality_detail="Strategy execution crashed: ValueError: feature "
         "window of 5000 bars is longer than the panel",
@@ -600,6 +612,7 @@ def test_table_of_a_pass_with_holdout() -> None:
         "| Check | Result | Value |",
         "| --- | --- | --- |",
         "| Verdict | PASS | audit v1.3.1, commit f9c2892 |",
+        "| Data | | panel `9abe5f927a377922`, holdout `cda6fb82ac1a69ac` |",
         f"| Causality | pass | `{CAUSAL_14}` |",
         "| Sharpe @ 5 bps | pass | +1.45, 95% CI [-1.27, +4.15] "
         "includes 0 |",
@@ -622,7 +635,7 @@ def test_table_of_a_reject_shows_the_failed_check() -> None:
         "**FAIL**",
         "-1.53 (needs > 0), 95% CI [-3.00, +0.07] includes 0",
     ]
-    del rows["Verdict"], rows["Sharpe @ 5 bps"]
+    del rows["Verdict"], rows["Data"], rows["Sharpe @ 5 bps"]
     assert [result for result, _ in rows.values()] == ["pass"] * 6
     assert "Holdout" not in rows
     assert "verdict is" not in table and "Parser notes" not in table
@@ -663,6 +676,7 @@ def test_error_message_cannot_pass_for_report_lines() -> None:
     rows = _rows(table)
     assert rows.pop("Verdict")[0] == "**REJECT**"
     assert rows.pop("Causality")[0] == "**FAIL**"
+    assert rows.pop("Data") == ["", f"panel `{TRAIN_SHA}`"]
     assert set(map(tuple, rows.values())) == {("?", "not read, see below")}
     assert f"- `{WITHHELD_NOTE}`" in table
     assert "+3.00" not in table and "Holdout" not in rows
@@ -841,6 +855,7 @@ def test_data_quality_gets_a_row_only_below_the_gate() -> None:
         "**FAIL**", f"DQS 74.92/100 (needs >= {DQS_MIN:g})"
     ]
     assert rows.pop("Verdict")[0] == "**REJECT**"
+    assert rows.pop("Data") == ["", "panel `2307dc25d97bd97a`"]
     assert {result for result, _ in rows.values()} == {"pass"}
     assert "The verdict is" not in table
 
@@ -897,6 +912,81 @@ def test_text_without_a_report(text: str, problem: str) -> None:
     assert audit_table(summary, "x").splitlines() == [
         "#### `x`", "", f"- `{problem}`"
     ]
+
+
+def test_file_hash_is_the_one_the_audit_prints(train: pd.DataFrame) -> None:
+    assert file_hash(TRAIN) == _sha256(TRAIN) == TRAIN_SHA
+    assert file_hash("no/such/file.parquet") is None
+
+
+def test_missing_data_hash_line_is_named() -> None:
+    lines = _report(REJECT_REPORT).splitlines(keepends=True)
+    text = "".join(ln for ln in lines if "data sha256" not in ln)
+    assert _parsed(text) == _expected(
+        REJECT_REPORT, data_sha256=None,
+        problems=["missing: data sha256 (no 'data sha256' line)"],
+    )
+
+
+def test_given_data_files_are_named_and_checked(
+    train: pd.DataFrame, tmp_path: Path
+) -> None:
+    summary = parse_audit_report(_report(REJECT_REPORT))
+    # The panel the report was made on: its path joins the hash.
+    files = {"panel": (str(TRAIN), file_hash(TRAIN))}
+    table = audit_table(summary, files=files)
+    assert _rows(table)["Data"] == ["", f"panel `{TRAIN}` (`{TRAIN_SHA}`)"]
+    assert "not the same data" not in table
+    # Another file, a holdout the report does not have, an unreadable
+    # file: each is named.
+    other = tmp_path / "panel.parquet"
+    other.write_bytes(b"not the panel")
+    files = {
+        "panel": (str(other), file_hash(other)),
+        "holdout": ("gone.parquet", None),
+    }
+    table = audit_table(summary, files=files)
+    assert _rows(table)["Data"][1] == (
+        f"panel `{other}` (`{file_hash(other)}`), holdout `gone.parquet` "
+        "(not readable)"
+    )
+    assert (
+        f"The report was made on panel `{TRAIN_SHA}`, but `{other}` is "
+        f"`{file_hash(other)}`: not the same data."
+    ) in table
+    assert (
+        "The report names no holdout, but `gone.parquet` was given as its "
+        "holdout."
+    ) in table
+
+
+def test_stopped_audit_names_the_data_it_was_given() -> None:
+    # The error line names no file; the caller's files do.
+    name = "holdout_late_start_error.txt"
+    files = {
+        "panel": ("data/train_1h.parquet", TRAIN_SHA),
+        "holdout": ("late.parquet", "62cd580c5a46df39"),
+    }
+    table = audit_table(parse_audit_report(_report(name)), "x", files)
+    assert table.splitlines()[:3] == [
+        "#### `x`",
+        "",
+        "Run with panel `data/train_1h.parquet` (`d68e6159bbdfb2e3`), "
+        "holdout `late.parquet` (`62cd580c5a46df39`).",
+    ]
+
+
+def test_command_line_with_data_files(
+    train: pd.DataFrame, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = REPORTS / REJECT_REPORT
+    assert main(["--data", str(TRAIN), str(report)]) == 0
+    files = {"panel": (str(TRAIN), TRAIN_SHA)}
+    table = audit_table(parse_audit_report(_report(report.name)), None, files)
+    assert capsys.readouterr().out == table + "\n"
+    # An unreadable data file fails the command, not the table.
+    assert main(["--holdout", "gone.parquet", str(report)]) == 1
+    assert "holdout `gone.parquet` (not readable)" in capsys.readouterr().out
 
 
 def test_command_line(

@@ -87,6 +87,19 @@ the table says so: the audit then gates on something the table does
 not show, or its format changed. Data quality gets a row only below
 the audit's gate; on the official panel it is the same for everyone.
 
+Which data. With many data files, a reviewer needs to know which one a
+run used, above all when it failed. The report prints the first 16 hex
+digits of the SHA-256 of the panel and the holdout file; the parser
+reads them, and the table shows them in a Data row. A hash names the
+content, where a path does not: a later download into the same path is
+other data. Paths are not printed at all, and when the audit stops
+before its report (holdout not one hour after the panel, exit code 2),
+its error line names no file. So the caller can name the files
+(``--data`` and ``--holdout`` on the command line, ``files`` of
+``audit_table``): the table then shows path and hash, says when a
+report was made on other data than the file given, and for a stopped
+audit says which files it was run with.
+
 Text a strategy chose. The causality and holdout lines can hold a
 strategy's error message. Since audit 1.3.2 it is one escaped line
 (``safe_text`` in ``src.sandbox``); before, a message with line breaks
@@ -101,6 +114,8 @@ pipes, so it cannot add links or markup to the summary.
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import math
 import re
 import sys
@@ -460,6 +475,7 @@ ONE_LINE_ERRORS = (1, 3, 2)  # audit version that prints errors on one line
 TURNOVER_MIN = 1e-5  # the audit's turnover gate at 5 bps
 DETAIL_MAX = 160  # characters of free text shown in the table
 NOTE_MAX = 400  # characters of a parser note below it
+HASH_LEN = 16  # hex digits of a file's SHA-256 that the audit prints
 
 _HEADER = "SYNDICATE AUDIT REPORT ::"
 # Every anchor starts a line: since audit 1.3.2 a strategy's error
@@ -468,12 +484,14 @@ _HEADER = "SYNDICATE AUDIT REPORT ::"
 _CAUSALITY = r"^\s*(?:\[\d+\]\s*)?CAUSALITY CHECK\s*:"
 _HOLDOUT = r"^\s*Holdout(?: Vault)?\s*:"
 _CRASHED = r"Strategy (?:execution )?crashed"
+_HEX = r"[0-9a-f]{8,64}"
 _NUM = r"[+-]?(?:\d+(?:\.\d+)?|nan|inf)"
 _CI = rf"\[{_NUM}, {_NUM}\]"
 _TAG = r"\[(PASS|FAIL)\b[^\]]*\]"
 
 Interval = tuple[float, float]
 Row = tuple[str, bool | None, str]  # label, result, value
+DataFiles = dict[str, tuple[str, "str | None"]]  # role: (path, hash)
 
 
 @dataclass
@@ -486,11 +504,17 @@ class AuditSummary:
     is None when the report does not have it, and ``problems`` says
     why; not named there are the holdout values, which only a run
     with ``--holdout`` has, the commit and the out-of-sample interval.
+    The ``*_sha256`` values are the first 16 hex digits of the SHA-256
+    of the strategy file, the ``--data`` panel and the ``--holdout``
+    file, as the audit prints them (since 1.0.0).
     """
 
     strategy: str | None = None
     version: str | None = None
     commit: str | None = None
+    strategy_sha256: str | None = None
+    data_sha256: str | None = None
+    holdout_sha256: str | None = None
     verdict: str | None = None  # "PASS" or "REJECT"
     causality_passed: bool | None = None
     causality_detail: str | None = None
@@ -717,6 +741,15 @@ def _read_head(lines: _Lines, s: AuditSummary) -> None:
             )
         commit = re.search(r"\bcommit ([0-9a-f]{7,40})\b", line)
         s.commit = commit[1] if commit else None
+        sha = re.search(rf"\bstrategy sha256 ({_HEX})\b", line)
+        s.strategy_sha256 = sha[1] if sha else None
+        what = "data sha256"
+        line = lines.find(what, what, r"^\s*data sha256\b")
+        found = lines.match(what, line, rf"\bdata sha256 ({_HEX})\b")
+        if found:
+            s.data_sha256 = found[1]
+            sha = re.search(rf"\bholdout sha256 ({_HEX})\b", line)
+            s.holdout_sha256 = sha[1] if sha else None
 
     line = lines.find(
         "verdict", "FINAL VERDICT", r"^\s*FINAL VERDICT\s*:", last=True
@@ -835,14 +868,27 @@ def _read_split(lines: _Lines, s: AuditSummary) -> None:
         s.holdout_detail = last if "=" not in last else None
 
 
-def audit_table(summary: AuditSummary, name: str | None = None) -> str:
+def audit_table(
+    summary: AuditSummary,
+    name: str | None = None,
+    files: DataFiles | None = None,
+) -> str:
     """The summary as Markdown: a heading, the table and any notes.
 
     ``name`` is the heading when the report has no strategy name.
+    ``files`` are the data files the caller ran the audit on, by role
+    ("panel", "holdout"): their path and hash, from ``file_hash``.
+    They name the data where the report does not, as when the audit
+    stopped before its report, and are checked against the hashes the
+    report prints.
     """
     s = summary
+    files = files or {}
     out = [f"#### {_code(s.strategy or name or 'audit report')}", ""]
+    data, data_notes = _data(s, files)
     if s.is_empty():
+        if data:
+            out += [f"Run with {data}.", ""]
         return "\n".join(out + [f"- {_code(p, NOTE_MAX)}" for p in s.problems])
     rows = _rows(s)
     if s.verdict is None:
@@ -859,18 +905,65 @@ def audit_table(summary: AuditSummary, name: str | None = None) -> str:
         "| --- | --- | --- |",
         f"| Verdict | {verdict} | {source} |",
     ]
+    if data:
+        out.append(f"| Data | | {_cell(data)} |")
     results = {True: "pass", False: "**FAIL**", None: "?"}
     out += [
         f"| {label} | {results[passed]} | {_cell(value)} |"
         for label, passed, value in rows
     ]
-    notes = _notes(s, rows)
+    notes = data_notes + _notes(s, rows)
     if notes:
         out += [""] + notes
     if s.problems:
         out += ["", "Parser notes:", ""]
         out += [f"- {_code(p, NOTE_MAX)}" for p in s.problems]
     return "\n".join(out)
+
+
+def _data(s: AuditSummary, files: DataFiles) -> tuple[str, list[str]]:
+    """The data a run used, and notes where report and files differ.
+
+    The report prints hashes; a path is known only from the caller.
+    """
+    parts, notes = [], []
+    printed = {"panel": s.data_sha256, "holdout": s.holdout_sha256}
+    for role, sha in printed.items():
+        path, file_sha = files.get(role, (None, None))
+        if path is None:
+            if sha:
+                parts.append(f"{role} {_code(sha)}")
+            continue
+        shown = _code(file_sha) if file_sha else "not readable"
+        parts.append(f"{role} {_code(path)} ({shown})")
+        if s.version is None:
+            continue  # no hashes in the report to check against
+        if sha is None:
+            notes.append(
+                f"The report names no {role}, but {_code(path)} was given "
+                f"as its {role}."
+            )
+        elif file_sha and file_sha != sha:
+            notes.append(
+                f"The report was made on {role} {_code(sha)}, but "
+                f"{_code(path)} is {_code(file_sha)}: not the same data."
+            )
+    return ", ".join(parts), notes
+
+
+def file_hash(path: str | Path) -> str | None:
+    """First 16 hex digits of the file's SHA-256, as the audit prints.
+
+    None when the file cannot be read.
+    """
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()[:HASH_LEN]
 
 
 def _rows(s: AuditSummary) -> list[Row]:
@@ -990,16 +1083,31 @@ def _cell(text: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m src.contrib.yousof [REPORT ...]``.
+    """``python -m src.contrib.yousof [options] [REPORT ...]``.
 
     Prints a Markdown table for each audit report in the REPORT files,
-    or on stdin without arguments, e.g. into ``$GITHUB_STEP_SUMMARY``.
-    Returns 1 when a file cannot be read, else 0, whatever the verdict.
+    or on stdin without any, e.g. into ``$GITHUB_STEP_SUMMARY``.
+    ``--data`` and ``--holdout`` name the files the audit ran on; see
+    ``audit_table``. Returns 1 when a file cannot be read, else 0,
+    whatever the verdict.
     """
-    paths = sys.argv[1:] if argv is None else argv
+    parser = argparse.ArgumentParser(
+        prog="python -m src.contrib.yousof",
+        description="Markdown tables of python -m src.audit reports.",
+    )
+    parser.add_argument("reports", nargs="*", metavar="REPORT")
+    parser.add_argument("--data", help="the --data panel of the runs")
+    parser.add_argument("--holdout", help="the --holdout file of the runs")
+    args = parser.parse_args(argv)
+    paths = args.reports
     texts: list[tuple[str | None, str]] = []
     blocks: list[str] = []
     status = 0
+    files: DataFiles = {}
+    for role, path in (("panel", args.data), ("holdout", args.holdout)):
+        if path:
+            files[role] = (path, file_hash(path))
+            status = 1 if files[role][1] is None else status
     for path in paths:
         try:
             with open(path, encoding="utf-8", errors="replace") as fh:
@@ -1012,7 +1120,8 @@ def main(argv: list[str] | None = None) -> int:
         texts.append((None, sys.stdin.read()))
     for name, text in texts:
         for report in split_reports(text) or [text]:
-            blocks.append(audit_table(parse_audit_report(report), name))
+            summary = parse_audit_report(report)
+            blocks.append(audit_table(summary, name, files))
     print("\n\n".join(blocks))
     return status
 
