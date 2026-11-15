@@ -103,6 +103,16 @@ its error line names no file. So the caller can name the files
 report was made on other data than the file given, and for a stopped
 audit says which files it was run with.
 
+Rows without a result. The signal tracks ask each write-up for the fee
+rows, the break-even fee, the split of PnL into price, fees and
+funding, and the correlation with ``baseline_flow.py``; the review
+flags of block [13] are read by hand for every strategy. The table
+shows them below the checks, read from blocks [5], [9], [12] and [13].
+The report prints no break-even fee: it is interpolated on a straight
+line between the two flat fee rows where the printed Sharpe changes
+sign, "> 10 bps" or "< 0 bps" when it does not, and the row says so.
+None of these rows is part of the verdict.
+
 Text a strategy chose. The causality and holdout lines can hold a
 strategy's error message. Since audit 1.3.2 it is one escaped line
 (``safe_text`` in ``src.sandbox``); before, a message with line breaks
@@ -518,6 +528,8 @@ _HEX = r"[0-9a-f]{8,64}"
 _NUM = r"[+-]?(?:\d+(?:\.\d+)?|nan|inf)"
 _CI = rf"\[{_NUM}, {_NUM}\]"
 _TAG = r"\[(PASS|FAIL)\b[^\]]*\]"
+_FEE_LABEL = r"^\s*(\d+(?:\.\d+)? bps|tiered ~\S+)\s"
+_FEE_CELL = rf"{_CI}(?: \(includes 0\))?|n/a|{_NUM}%?"
 
 Interval = tuple[float, float]
 Row = tuple[str, bool | None, str]  # label, result, value
@@ -538,6 +550,13 @@ class AuditSummary:
     The ``*_sha256`` values are the first 16 hex digits of the SHA-256
     of the strategy file, the ``--data`` panel and the ``--holdout``
     file, as the audit prints them (since 1.0.0).
+
+    ``fee_sharpes`` is the Sharpe of every row of the fee table, by
+    the row's label ("0.0 bps", ..., "tiered ~7.7"). The ``*_pct``
+    values are the cumulative PnL parts of block [9] at 5 bps, in
+    percent; a positive funding drag is a cost. ``baseline_corr`` and
+    ``review_flags`` are blocks [12] and [13], which not every report
+    has; the flags are "none" when the block lists none.
     """
 
     strategy: str | None = None
@@ -567,6 +586,13 @@ class AuditSummary:
     holdout_sharpe: float | None = None
     holdout_sharpe_ci: Interval | None = None
     holdout_detail: str | None = None
+    fee_sharpes: list[tuple[str, float]] | None = None
+    gross_pnl_pct: float | None = None
+    fee_cost_pct: float | None = None
+    funding_drag_pct: float | None = None
+    net_pnl_pct: float | None = None
+    baseline_corr: float | None = None
+    review_flags: str | None = None
     problems: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -647,6 +673,8 @@ def parse_audit_report(text: str) -> AuditSummary:
     _read_checks(lines, summary)
     _read_fee_row(lines, summary)
     _read_split(lines, summary)
+    _read_fee_rows(lines, summary)
+    _read_more(lines, summary)
     if lines.withheld_hits:
         summary.problems.append(
             "not read, as they come below a strategy's error message, "
@@ -715,6 +743,8 @@ class _Lines:
         ``label`` is how the anchor reads in the report. With ``last``,
         the last matching line of the whole report, including withheld
         lines: anything a strategy wrote comes before the last line.
+        Without ``required``, a report that has no such line is no
+        problem; a withheld one is named either way.
         """
         if last:
             for line in reversed(self.lines + self.withheld):
@@ -724,7 +754,7 @@ class _Lines:
             for line in self.lines:
                 if re.search(anchor, line):
                     return line
-        if required and any(re.search(anchor, ln) for ln in self.withheld):
+        if any(re.search(anchor, ln) for ln in self.withheld):
             self.withheld_hits.append(what)
         elif required:
             self.problems.append(f"missing: {what} (no {label!r} line)")
@@ -877,8 +907,7 @@ def _read_fee_row(lines: _Lines, s: AuditSummary) -> None:
         return
     names = re.split(r"\s{2,}", header.strip())[1:]
     rest = re.sub(r"^\s*5\.0 bps", "", row)
-    cell = rf"{_CI}(?: \(includes 0\))?|n/a|{_NUM}%?"
-    cells = [found[0] for found in re.finditer(cell, rest)]
+    cells = re.findall(_FEE_CELL, rest)
     if len(cells) != len(names):
         lines.problems.append(
             f"unparseable: 5 bps row, {len(cells)} values under "
@@ -937,6 +966,68 @@ def _read_split(lines: _Lines, s: AuditSummary) -> None:
         s.holdout_detail = last if "=" not in last else None
 
 
+def _read_fee_rows(lines: _Lines, s: AuditSummary) -> None:
+    """The Sharpe of every row of the fee table, by the row's label.
+
+    Read by the header, like the 5 bps row. The list is kept only when
+    the table is whole: a row that cannot be read, or a table that
+    breaks off, could hide where the Sharpe changes sign.
+    """
+    header = lines.find_optional(r"^\s*Fee \(bps\)")
+    if header is None:
+        return  # named by _read_fee_row
+    names = re.split(r"\s{2,}", header.strip())[1:]
+    rows: list[tuple[str, float]] = []
+    for row in lines.lines[lines.lines.index(header) + 1:]:
+        label = re.match(_FEE_LABEL, row)
+        if label is None:
+            if not row.strip():
+                return  # cut off in the indent of the next row
+            break
+        if label[1] == "5.0 bps":
+            if s.sharpe_5bps is None:
+                return  # named by _read_fee_row
+            rows.append((label[1], s.sharpe_5bps))
+            continue
+        cells = re.findall(_FEE_CELL, row[label.end():])
+        sharpe = dict(zip(names, cells)).get("Sharpe", "")
+        if len(cells) != len(names) or not re.fullmatch(_NUM, sharpe):
+            lines.unparseable("Sharpe by fee", row)
+            return
+        rows.append((label[1], float(sharpe)))
+    else:
+        return  # no line below the table: the report breaks off here
+    s.fee_sharpes = rows or None
+
+
+def _read_more(lines: _Lines, s: AuditSummary) -> None:
+    """The PnL parts of block [9], and blocks [12] and [13] if there."""
+
+    def pnl(what: str, label: str) -> float | None:
+        line = lines.find(what, label, rf"^\s*{label}\s*:")
+        return lines.number(what, line, rf":\s*({_NUM})%")
+
+    s.gross_pnl_pct = pnl("PnL breakdown", "Gross PnL")
+    if s.gross_pnl_pct is not None:  # else the block is named once
+        s.fee_cost_pct = pnl("fee cost", "Fee Cost")
+        s.funding_drag_pct = pnl("funding drag", "Funding Drag")
+        s.net_pnl_pct = pnl("net PnL", "Net PnL")
+
+    # Block [12] is not printed for baseline_flow.py itself or after a
+    # crash, and neither block before audit 1.0.0.
+    what = "correlation with baseline"
+    anchor = r"^\s*(?:\[\d+\]\s*)?CORRELATION\s*:"
+    line = lines.find(what, "CORRELATION", anchor, required=False)
+    s.baseline_corr = lines.number(what, line, rf"=\s*({_NUM})\s*$")
+
+    what = "review flags"
+    anchor = r"^\s*(?:\[\d+\]\s*)?REVIEW FLAGS\s*:"
+    line = lines.find(what, "REVIEW FLAGS", anchor, required=False)
+    found = lines.match(what, line, r":\s*(.*?)\s*\(manual review\b")
+    if found:
+        s.review_flags = found[1]
+
+
 def audit_table(
     summary: AuditSummary,
     name: str | None = None,
@@ -981,6 +1072,7 @@ def audit_table(
         f"| {label} | {results[passed]} | {_cell(value)} |"
         for label, passed, value in rows
     ]
+    out += [f"| {label} | | {_cell(value)} |" for label, value in _more(s)]
     notes = data_notes + _notes(s, rows)
     if notes:
         out += [""] + notes
@@ -1096,6 +1188,78 @@ def _rows(s: AuditSummary) -> list[Row]:
         dqs = f"DQS {s.dqs:g}/100 (needs >= {DQS_MIN:g})"
         rows.append(("Data quality", False, dqs))
     return rows
+
+
+def _more(s: AuditSummary) -> list[tuple[str, str]]:
+    """(label, value) of the rows without a result, below the checks.
+
+    What the signal tracks ask of a write-up, and the review flags. A
+    run that did not trade, as after a crash, prints zeros there, so
+    it gets no fee or PnL rows.
+    """
+    rows = []
+    traded = s.turnover_5bps is None or s.turnover_5bps > 0
+    if s.fee_sharpes and traded:
+        cells = []
+        for label, sharpe in s.fee_sharpes:
+            fee = _flat_fee(label)
+            name = label if fee is None else f"{fee:g}"
+            cells.append(f"{name} bps {sharpe:+.2f}")
+        rows.append(("Sharpe by fee", ", ".join(cells)))
+        even = _break_even(s.fee_sharpes)
+        if even:
+            rows.append(("Break-even fee", even))
+    if s.gross_pnl_pct is not None and traded:
+        parts = (
+            ("gross", s.gross_pnl_pct),
+            ("fee cost", s.fee_cost_pct),
+            ("funding drag", s.funding_drag_pct),
+            ("net", s.net_pnl_pct),
+        )
+        pnl = [f"{name} {x:+.2f}%" for name, x in parts if x is not None]
+        rows.append(("PnL @ 5 bps", ", ".join(pnl)))
+    if s.baseline_corr is not None:
+        corr = f"{s.baseline_corr:+.2f}, hourly net returns at 5 bps"
+        rows.append(("Correlation with baseline", corr))
+    if s.review_flags and s.review_flags != "none":
+        flags = _code(s.review_flags)
+        flags += " (manual review, not part of the verdict)"
+        rows.append(("Review flags", flags))
+    return rows
+
+
+def _flat_fee(label: str) -> float | None:
+    """The fee of a flat fee row in bps; None for the tiered row."""
+    found = re.fullmatch(r"(\d+(?:\.\d+)?) bps", label)
+    return float(found[1]) if found else None
+
+
+def _break_even(fee_sharpes: list[tuple[str, float]]) -> str:
+    """The fee at which the Sharpe crosses zero, from the flat rows.
+
+    The report prints no such value. It is interpolated on a straight
+    line between the two rows where the printed Sharpe changes sign: a
+    first look, not a result of the audit. "" when the rows do not say.
+    """
+    flat = sorted(
+        (fee, sharpe)
+        for label, sharpe in fee_sharpes
+        if (fee := _flat_fee(label)) is not None
+    )
+    if len(flat) < 2 or any(math.isnan(sharpe) for _, sharpe in flat):
+        return ""
+    lowest, highest = flat[0][0], flat[-1][0]
+    if flat[0][1] <= 0:
+        return f"< {lowest:g} bps (Sharpe not above 0 at {lowest:g} bps)"
+    for (fee, sharpe), (next_fee, next_sharpe) in zip(flat, flat[1:]):
+        if next_sharpe <= 0:
+            share = sharpe / (sharpe - next_sharpe)
+            even = fee + (next_fee - fee) * share
+            return (
+                f"about {even:.2f} bps, interpolated between the "
+                f"{fee:g} and {next_fee:g} bps rows"
+            )
+    return f"> {highest:g} bps (Sharpe above 0 in every fee row)"
 
 
 def _notes(s: AuditSummary, rows: list[Row]) -> list[str]:

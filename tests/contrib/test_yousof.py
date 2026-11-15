@@ -412,7 +412,8 @@ FORGING_SHA = "b95f1fc02841b1f2"
 WITHHELD_NOTE = (
     "not read, as they come below a strategy's error message, which "
     "before audit 1.3.2 could add lines of its own: lag test, null check, "
-    "wick share, fee table, 5 bps row, out-of-sample Sharpe"
+    "wick share, fee table, 5 bps row, out-of-sample Sharpe, PnL "
+    "breakdown, review flags"
 )
 VERSION_NOTE = (
     "audit v{} is not one this parser was checked against (1.0.0 to "
@@ -430,6 +431,12 @@ BASELINE = dict(
     lag1_sharpe=-1.53, lag2_sharpe=-1.53, lag_passed=True,
     null_mean=-0.0, null_sd=0.74, null_passed=True,
     wick_share_pct=2.2, wick_passed=True,
+    fee_sharpes=[
+        ("0.0 bps", -0.12), ("3.0 bps", -0.97), ("5.0 bps", -1.53),
+        ("10.0 bps", -2.95), ("tiered ~7.7", -2.29),
+    ],
+    gross_pnl_pct=-3.96, fee_cost_pct=38.80, funding_drag_pct=-0.77,
+    net_pnl_pct=-42.00, review_flags="none",
 )
 LEAKY = dict(
     strategy="leaky_example.py", version="1.3.1", commit="f9c2892",
@@ -444,6 +451,13 @@ LEAKY = dict(
     lag2_sharpe=-10.33, lag_passed=False, null_mean=-0.11,
     null_sd=0.83, null_passed=True, wick_share_pct=0.9,
     wick_passed=True,
+    fee_sharpes=[
+        ("0.0 bps", -0.19), ("3.0 bps", -5.60), ("5.0 bps", -9.21),
+        ("10.0 bps", -18.21), ("tiered ~7.7", -14.13),
+    ],
+    gross_pnl_pct=-21.12, fee_cost_pct=1014.79, funding_drag_pct=-0.21,
+    net_pnl_pct=-1035.70, baseline_corr=-0.05,
+    review_flags="negative shift or centered window (lines 20)",
 )
 EXPECTED: dict[str, dict] = {
     REJECT_REPORT: BASELINE,
@@ -474,6 +488,12 @@ EXPECTED: dict[str, dict] = {
         lag1_sharpe=2.85, lag2_sharpe=2.69, lag_passed=True,
         null_mean=0.28, null_sd=1.71, null_passed=True,
         wick_share_pct=2.4, wick_passed=True,
+        fee_sharpes=[
+            ("0.0 bps", 4.17), ("3.0 bps", 3.38), ("5.0 bps", 2.85),
+            ("10.0 bps", 1.53), ("tiered ~7.7", 2.12),
+        ],
+        gross_pnl_pct=23.16, fee_cost_pct=7.32, funding_drag_pct=0.07,
+        net_pnl_pct=15.78, review_flags="none",
     ),
     # Version 1.3.2 changed how error messages are printed, not the
     # numbers.
@@ -509,6 +529,12 @@ EXPECTED: dict[str, dict] = {
         oos_sharpe_ci=(math.nan, math.nan), lag1_sharpe=0.0,
         lag2_sharpe=0.0, lag_passed=False, null_mean=0.0, null_sd=0.0,
         null_passed=False, wick_share_pct=100.0, wick_passed=False,
+        fee_sharpes=[
+            ("0.0 bps", 0.0), ("3.0 bps", 0.0), ("5.0 bps", 0.0),
+            ("10.0 bps", 0.0),
+        ],
+        gross_pnl_pct=0.0, fee_cost_pct=0.0, funding_drag_pct=0.0,
+        net_pnl_pct=0.0, review_flags="none",
     ),
     # The audit stops before the report (exit code 2).
     "holdout_late_start_error.txt": dict(
@@ -531,6 +557,12 @@ EXPECTED: dict[str, dict] = {
         wick_share_pct=1.8, wick_passed=True, holdout_passed=True,
         holdout_sharpe=3.10, holdout_sharpe_ci=(-6.78, 13.09),
         holdout_detail="bar-by-bar evaluation",
+        fee_sharpes=[
+            ("0.0 bps", 2.96), ("3.0 bps", 2.05), ("5.0 bps", 1.45),
+            ("10.0 bps", -0.07), ("tiered ~7.7", 0.61),
+        ],
+        gross_pnl_pct=21.53, fee_cost_pct=11.08, funding_drag_pct=-0.12,
+        net_pnl_pct=10.56, review_flags="none",
     ),
     "crashing_example_v1.3.1.txt": dict(
         strategy="crashing_example.py", version="1.3.1", commit="f9c2892",
@@ -552,6 +584,12 @@ EXPECTED: dict[str, dict] = {
         dqs=99.93, sharpe_5bps=3.15, turnover_5bps=0.0504, oos_sharpe=4.19,
         lag1_sharpe=3.15, lag2_sharpe=3.14, lag_passed=True,
         wick_share_pct=2.4, wick_passed=True,
+        fee_sharpes=[
+            ("0.0 bps", 4.48), ("3.0 bps", 3.68), ("5.0 bps", 3.15),
+            ("10.0 bps", 1.83),
+        ],
+        gross_pnl_pct=29.42, fee_cost_pct=8.71, funding_drag_pct=-0.03,
+        net_pnl_pct=20.73,
         problems=[
             "missing: audit version (no 'audit v...' line); the report is "
             "older than audit 1.0.0 or its format changed",
@@ -646,6 +684,12 @@ def test_table_of_a_pass_with_holdout() -> None:
         "| Turnover @ 5 bps | pass | 0.0513 |",
         "| Holdout | pass | +3.10, 95% CI [-6.78, +13.09] includes 0, "
         "`bar-by-bar evaluation` |",
+        "| Sharpe by fee | | 0 bps +2.96, 3 bps +2.05, 5 bps +1.45, 10 bps "
+        "-0.07, tiered ~7.7 bps +0.61 |",
+        "| Break-even fee | | about 9.77 bps, interpolated between the 5 "
+        "and 10 bps rows |",
+        "| PnL @ 5 bps | | gross +21.53%, fee cost +11.08%, funding drag "
+        "-0.12%, net +10.56% |",
     ]
 
 
@@ -658,7 +702,8 @@ def test_table_of_a_reject_shows_the_failed_check() -> None:
         "-1.53 (needs > 0), 95% CI [-3.00, +0.07] includes 0",
     ]
     del rows["Verdict"], rows["Data"], rows["Sharpe @ 5 bps"]
-    assert [result for result, _ in rows.values()] == ["pass"] * 6
+    checks = [result for result, _ in rows.values() if result]
+    assert checks == ["pass"] * 6
     assert "Holdout" not in rows
     assert "verdict is" not in table and "Parser notes" not in table
 
@@ -778,7 +823,7 @@ def test_error_message_in_the_holdout_line_before_1_3_2() -> None:
     assert summary.problems == [
         "not read, as they come below a strategy's error message, which "
         "before audit 1.3.2 could add lines of its own: lag test, null "
-        "check, wick share"
+        "check, wick share, PnL breakdown, review flags"
     ]
 
 
@@ -802,6 +847,77 @@ def test_table_of_a_report_older_than_the_version_line() -> None:
     assert notes == [
         f"- `{p}`" for p in EXPECTED["baseline_flow_6ed3535.txt"]["problems"]
     ]
+
+
+def test_table_has_the_numbers_a_strategy_write_up_asks_for() -> None:
+    # Fee rows, break-even fee, PnL split and correlation with the
+    # baseline (Issues #4, #5, #7), and the review flags of block [13].
+    # They carry no result: none of them is part of the verdict.
+    rows = _rows(_table(_report("leaky_example_v1.3.1.txt")))
+    assert rows["Sharpe by fee"] == [
+        "",
+        "0 bps -0.19, 3 bps -5.60, 5 bps -9.21, 10 bps -18.21, tiered "
+        "~7.7 bps -14.13",
+    ]
+    assert rows["PnL @ 5 bps"] == [
+        "",
+        "gross -21.12%, fee cost +1014.79%, funding drag -0.21%, net "
+        "-1035.70%",
+    ]
+    assert rows["Correlation with baseline"] == [
+        "", "-0.05, hourly net returns at 5 bps"
+    ]
+    assert rows["Review flags"] == [
+        "",
+        "`negative shift or centered window (lines 20)` (manual review, "
+        "not part of the verdict)",
+    ]
+    # The baseline has no correlation with itself and no flags, and a
+    # run that crashed prints zeros: no such rows.
+    rows = _rows(_table(_report(REJECT_REPORT)))
+    assert "Correlation with baseline" not in rows
+    assert "Review flags" not in rows
+    rows = _rows(_table(_report("forging_example_v1.3.2.txt")))
+    assert "Sharpe by fee" not in rows and "PnL @ 5 bps" not in rows
+
+
+def test_break_even_fee_is_interpolated_from_the_fee_rows() -> None:
+    # The report prints no break-even fee. Between the two rows where
+    # the Sharpe changes sign it is read off a straight line, and the
+    # row says so; without a change of sign it is only a bound.
+    def break_even(text: str) -> str:
+        return _rows(_table(text))["Break-even fee"][1]
+
+    assert break_even(_report(PASS_REPORT)) == (
+        "about 9.77 bps, interpolated between the 5 and 10 bps rows"
+    )
+    assert break_even(_report("baseline_flow_low_dqs_v1.3.1.txt")) == (
+        "> 10 bps (Sharpe above 0 in every fee row)"
+    )
+    assert break_even(_report(REJECT_REPORT)) == (
+        "< 0 bps (Sharpe not above 0 at 0 bps)"
+    )
+    # The 0 and 3 bps rows of #9, where 0.39 bps was worked out by hand.
+    text = _report(REJECT_REPORT)
+    text = _edit(text, "0.0 bps      -0.12", "0.0 bps      +1.48")
+    text = _edit(text, "3.0 bps      -0.97", "3.0 bps      -9.93")
+    assert break_even(text) == (
+        "about 0.39 bps, interpolated between the 0 and 3 bps rows"
+    )
+
+
+def test_fee_row_that_cannot_be_read_leaves_the_fee_rows_unread() -> None:
+    # A list with a row missing could hide where the Sharpe changes
+    # sign, so there is no list then, and the row is named.
+    row = "3.0 bps      -0.97  [-2.41, +0.65] (includes 0)"
+    text = _edit(_report(REJECT_REPORT), row, row.replace("-0.97", "  n/a"))
+    summary = parse_audit_report(text)
+    assert summary.fee_sharpes is None and summary.sharpe_5bps == -1.53
+    assert summary.problems == [
+        "unparseable: Sharpe by fee in '3.0 bps        n/a  [-2.41, "
+        "+0.65] (includes 0)      0.003   -15.60%   -56.92%    0.0522'"
+    ]
+    assert "Sharpe by fee" not in _rows(audit_table(summary))
 
 
 # --- robustness: a format that changes, output that is cut ------------
@@ -852,7 +968,8 @@ def test_fee_table_is_read_by_its_header() -> None:
     header = "  DSR(N=10)"
     row = "-1.53  [-3.00, +0.07] (includes 0)      0.000"
     text = _edit(_report(REJECT_REPORT), header, "")
-    text = _edit(text, row, row.removesuffix("      0.000"))
+    text, rows = re.subn(r" +\d\.\d{3}(?= +[-+][\d.]+%)", "", text)
+    assert rows == 5
     assert _parsed(text) == _expected(REJECT_REPORT)
     # A cell without a column name is not given one.
     text = _edit(_report(REJECT_REPORT), row, row + "      0.111")
@@ -924,7 +1041,7 @@ def test_data_quality_gets_a_row_only_below_the_gate() -> None:
     ]
     assert rows.pop("Verdict")[0] == "**REJECT**"
     assert rows.pop("Data") == ["", "panel `2307dc25d97bd97a`"]
-    assert {result for result, _ in rows.values()} == {"pass"}
+    assert {result for result, _ in rows.values() if result} == {"pass"}
     assert "The verdict is" not in table
 
 
