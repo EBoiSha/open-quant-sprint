@@ -124,13 +124,12 @@ jobs:
         run: |
           reports="$RUNNER_TEMP/audit_reports"
           if ! ls "$reports"/*.txt > /dev/null 2>&1; then exit 0; fi
-          # The parser as on main: a pull request may change contrib files.
+          # Always the parser as on main: a pull request may change contrib files.
           parser="$RUNNER_TEMP/audit_table.py"
           git show origin/main:src/contrib/yousof.py > "$parser" 2>/dev/null || true
-          grep -q '^def audit_table' "$parser" || cp src/contrib/yousof.py "$parser"
           echo "### Audit summary" >> "$GITHUB_STEP_SUMMARY"
           if ! grep -q '^def audit_table' "$parser"; then
-            echo "No table: the parser is not on main yet." >> "$GITHUB_STEP_SUMMARY"
+            echo "No table: the parser could not be read from main." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           PYTHONPATH="$GITHUB_WORKSPACE" python "$parser" "$reports"/*.txt >> "$GITHUB_STEP_SUMMARY"
