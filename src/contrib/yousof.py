@@ -12,7 +12,18 @@ From Issue #1: the same symbols, columns and dtypes as the panel;
 every symbol starting exactly one hour after it ends in the panel,
 with no overlapping keys and no gaps; with ``as_of``, only bars that
 had closed at download time; and, as a warning, funding outside
-00:00/08:00/16:00 UTC.
+00:00/08:00/16:00 UTC. ``python -m src.contrib.yousof --continuation
+PREV NEW`` runs the check on two files.
+
+Missing hours are warnings. A gap on the exchange's side is still
+there after a second download, and the run then goes ahead on the bars
+that exist, with the gap listed in the report. So an hour without a
+bar is a warning that names the symbol and the hours, wherever it is:
+at the start of a symbol, in between or at its end. The builder fills
+a gap of up to three hours with bars of zero volume and drops the
+hours after that, so such bars are named as well. One case stays an
+error: a file that starts late as a whole, because the audit stops on
+it.
 
 Why the start is checked per symbol. ``holdout_start_problem`` in
 ``src.audit`` compares the first timestamp of the whole file with the
@@ -29,7 +40,10 @@ Checks beyond the Issue, and what each is for:
   a missing hour, so it would count as a bar of its own.
 - A symbol that ends before or after the others. A download cut short
   for one symbol leaves no gap inside the file, only a shorter tail,
-  and the last hours then lack that symbol in the cross-section.
+  and the last hours then lack that symbol in the cross-section: its
+  missing hours are named. Bars after the others end are an error.
+- Bars with zero volume, as a warning. The train panel has none, so
+  in a new file they are bars the builder filled in.
 - Funding that is zero at every settlement hour of a symbol, as a
   warning. ``data/build_dataset.py`` writes 0 when the funding
   download comes back empty, so a failed download reads as free
@@ -152,8 +166,8 @@ def check_continuation(
     One readable line per problem. A line starts with "error:" when the
     file must not be evaluated as it is, and with "warning:" when it
     needs a look but can be legitimate (Binance can move a symbol to
-    another funding interval). Errors come first. An empty list means
-    OK.
+    another funding interval; an hour can be missing on the exchange's
+    side). Errors come first. An empty list means OK.
 
     ``as_of`` is the download time; without a time zone it is read as
     UTC. With it, bars that had not closed by then are reported.
@@ -166,7 +180,9 @@ def check_continuation(
         on_grid = new.loc[~off_grid]
         errors += _symbol_errors(prev, new)
         errors += _key_errors(prev, new, off_grid)
-        errors += _seam_errors(prev, on_grid)
+        seam_errors, gaps = _seam_problems(prev, on_grid)
+        errors += seam_errors
+        warnings += gaps
         warnings += _seam_jump_warnings(prev, on_grid)
         if as_of is not None:
             errors += _unclosed_errors(new, as_of)
@@ -328,16 +344,19 @@ def _key_errors(
     return errors
 
 
-def _seam_errors(prev: pd.DataFrame, on_grid: pd.DataFrame) -> list[str]:
-    """Per symbol: where ``new`` starts and ends, and missing hours.
+def _seam_problems(
+    prev: pd.DataFrame, on_grid: pd.DataFrame
+) -> tuple[list[str], list[str]]:
+    """Where ``new`` starts and ends, and the hours it lacks.
 
-    A symbol has to start one hour after it ends in ``prev``, end with
-    the other symbols and have every hour in between. Symbols with the
-    same problem share one line, so an hour missing across the panel is
-    one line, not 20.
+    Errors: the file does not start one hour after ``prev`` ends, which
+    the audit stops on, or a symbol has bars after the others end.
+    Warnings: the hours a symbol lacks between the start of the file
+    and the end of the others. Symbols with the same problem share one
+    line, so an hour missing across the panel is one line, not 20.
     """
     if on_grid.empty:
-        return []
+        return [], []
     prev_end = prev.groupby("symbol")["timestamp"].max()
     stamps = on_grid.drop_duplicates(KEYS).groupby("symbol")["timestamp"]
     starts, ends = stamps.min(), stamps.max()
@@ -345,34 +364,42 @@ def _seam_errors(prev: pd.DataFrame, on_grid: pd.DataFrame) -> list[str]:
     # not make the complete symbols look wrong.
     common_end = ends.mode().max()
     checked = sorted(set(starts.index) & set(prev_end.index))
-    found: dict[str, list[str]] = {}
+    if not checked:
+        return [], []
+    expected = prev_end[checked] + HOUR
+    file_start = starts[checked].min()
+    wrong: dict[str, list[str]] = {}
+    lacking: dict[str, list[str]] = {}
     for sym in checked:
-        start, end = starts[sym], ends[sym]
-        expected = prev_end[sym] + HOUR
-        if start != expected:
+        if starts[sym] == file_start != expected[sym]:
             msg = (
-                f"new starts at {_fmt(start)} UTC, expected "
-                f"{_fmt(expected)}, one hour after prev ends"
+                f"new starts at {_fmt(file_start)} UTC, expected "
+                f"{_fmt(expected[sym])}, one hour after prev ends"
             )
-            found.setdefault(msg, []).append(sym)
-        if end != common_end:
+            wrong.setdefault(msg, []).append(sym)
+        if ends[sym] > common_end:
             msg = (
-                f"new ends at {_fmt(end)} UTC, most symbols end at "
+                f"new ends at {_fmt(ends[sym])} UTC, most symbols end at "
                 f"{_fmt(common_end)}"
             )
-            found.setdefault(msg, []).append(sym)
-        grid = pd.date_range(start, end, freq="h")
+            wrong.setdefault(msg, []).append(sym)
+        # Hours before a late start of the whole file are that error.
+        first = max(expected[sym], file_start)
+        grid = pd.date_range(first, common_end, freq="h")
         gaps = grid.difference(pd.DatetimeIndex(stamps.get_group(sym)))
         if not gaps.empty:
             msg = f"no bar at {_hours(gaps)} UTC ({len(gaps)} missing)"
-            found.setdefault(msg, []).append(sym)
+            lacking.setdefault(msg, []).append(sym)
 
-    errors = []
-    for msg, syms in found.items():
-        everyone = len(syms) == len(checked) > 1
-        who = f"all {len(syms)} symbols" if everyone else ", ".join(syms)
-        errors.append(f"{who}: {msg}")
-    return errors
+    def lines(found: dict[str, list[str]]) -> list[str]:
+        out = []
+        for msg, syms in found.items():
+            everyone = len(syms) == len(checked) > 1
+            who = f"all {len(syms)} symbols" if everyone else ", ".join(syms)
+            out.append(f"{who}: {msg}")
+        return out
+
+    return lines(wrong), lines(lacking)
 
 
 def _seam_jump_warnings(
@@ -422,22 +449,31 @@ def _unclosed_errors(new: pd.DataFrame, as_of: pd.Timestamp) -> list[str]:
 
 
 def _volume_warnings(on_grid: pd.DataFrame) -> list[str]:
-    """Symbols with zero volume in every bar of ``new``.
+    """Bars with zero volume, and symbols with nothing else.
 
     Zero volume is valid OHLC, so neither the errors here nor
-    ``audit_dataset`` catch it; over a whole file it more likely means
-    a failed download than a quiet market.
+    ``audit_dataset`` catch it. Over a whole file it more likely means
+    a failed download than a quiet market. A few such bars are what
+    the builder writes into a gap of up to three hours: the last close
+    carried forward, with no trade behind it.
     """
     traded = on_grid["volume"] > 0
     counts = traded.groupby(on_grid["symbol"]).agg(["any", "size"])
     quiet = ~counts["any"] & (counts["size"] >= SILENT_VOLUME_MIN)
     silent = sorted(counts.index[quiet])
-    if not silent:
-        return []
-    return [
-        f"volume is zero in every bar for {', '.join(silent)}; did the "
-        "download fail?"
-    ]
+    warnings = []
+    filled = on_grid.loc[~traded & ~on_grid["symbol"].isin(silent)]
+    if not filled.empty:
+        warnings.append(
+            f"{len(filled)} bars in new have zero volume, as when the "
+            f"builder fills a short gap: {_by_symbol(filled)}"
+        )
+    if silent:
+        warnings.append(
+            f"volume is zero in every bar for {', '.join(silent)}; did "
+            "the download fail?"
+        )
+    return warnings
 
 
 def _quality_errors(new: pd.DataFrame) -> list[str]:
@@ -1157,6 +1193,26 @@ def _cell(text: str) -> str:
     return text.replace("|", "\\|")
 
 
+def _check_files(prev: str, new: str, as_of: str | None = None) -> int:
+    """Print what ``check_continuation`` finds for two data files.
+
+    The first lines name the files with the hash the audit prints for
+    them, so the output says which data was checked.
+    """
+    frames = []
+    for path in (prev, new):
+        try:
+            frames.append(pd.read_parquet(path))
+        except (OSError, ValueError) as exc:
+            print(f"Could not read {path}: {exc}")
+            return 2
+    print(f"prev: {prev} (sha256 {file_hash(prev)})")
+    print(f"new: {new} (sha256 {file_hash(new)})")
+    problems = check_continuation(*frames, as_of=as_of)
+    print("\n".join(problems) if problems else "no problems")
+    return 1 if any(line.startswith("error:") for line in problems) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """``python -m src.contrib.yousof [options] [REPORT ...]``.
 
@@ -1165,6 +1221,11 @@ def main(argv: list[str] | None = None) -> int:
     ``--data`` and ``--holdout`` name the files the audit ran on; see
     ``audit_table``. Returns 1 when a file cannot be read, else 0,
     whatever the verdict.
+
+    ``--continuation PREV NEW`` runs ``check_continuation`` on two
+    data files instead and prints what it finds, ``--as-of`` being the
+    download time of NEW. It returns 1 on an error, 2 when a file
+    cannot be read, else 0; warnings alone are 0.
     """
     parser = argparse.ArgumentParser(
         prog="python -m src.contrib.yousof",
@@ -1173,7 +1234,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("reports", nargs="*", metavar="REPORT")
     parser.add_argument("--data", help="the --data panel of the runs")
     parser.add_argument("--holdout", help="the --holdout file of the runs")
+    parser.add_argument(
+        "--continuation", nargs=2, metavar=("PREV", "NEW"),
+        help="check that the data file NEW continues PREV; no REPORT",
+    )
+    parser.add_argument(
+        "--as-of", metavar="TIME",
+        help="with --continuation: when NEW was downloaded (UTC)",
+    )
     args = parser.parse_args(argv)
+    if args.continuation:
+        if args.reports or args.data or args.holdout:
+            parser.error("--continuation takes only --as-of")
+        return _check_files(*args.continuation, as_of=args.as_of)
+    if args.as_of:
+        parser.error("--as-of needs --continuation")
     paths = args.reports
     texts: list[tuple[str | None, str]] = []
     blocks: list[str] = []

@@ -26,7 +26,7 @@ from src.contrib.yousof import (
     parse_audit_report,
     split_reports,
 )
-from src.quality import audit_dataset
+from src.quality import audit_dataset, autoclean_market_data
 
 TRAIN = Path("data/train_1h.parquet")
 HOUR = pd.Timedelta(hours=1)
@@ -155,7 +155,7 @@ def test_dropped_hour_is_reported(split: Split) -> None:
     sym, hour = _sym(new), _hour(new, 100)
     dropped = (new["symbol"] == sym) & (new["timestamp"] == hour)
     assert check_continuation(prev, new.loc[~dropped]) == [
-        f"error: {sym}: no bar at {_fmt(hour)} UTC (1 missing)"
+        f"warning: {sym}: no bar at {_fmt(hour)} UTC (1 missing)"
     ]
 
 
@@ -180,14 +180,15 @@ def test_symbol_shifted_by_one_hour_is_reported(split: Split) -> None:
 
     problems = check_continuation(prev, shifted)
     assert _errors(problems) == [
-        f"error: {sym}: new starts at {_fmt(start + HOUR)} UTC, expected "
-        f"{_fmt(start)}, one hour after prev ends",
         f"error: {sym}: new ends at {_fmt(end + HOUR)} UTC, most symbols "
-        f"end at {_fmt(end)}",
+        f"end at {_fmt(end)}"
     ]
-    # The shift also moves the symbol's funding off the settlement
-    # hours.
-    assert any(sym in w and OFF_HOURS in w for w in _warnings(problems))
+    # Its first hour is missing, and the shift moves its funding off
+    # the settlement hours.
+    warnings = _warnings(problems)
+    missing = f"warning: {sym}: no bar at {_fmt(start)} UTC (1 missing)"
+    assert warnings[0] == missing
+    assert any(sym in w and OFF_HOURS in w for w in warnings)
 
 
 def test_funding_at_0500_is_a_warning_not_an_error(split: Split) -> None:
@@ -213,7 +214,7 @@ def test_whole_missing_hour_is_one_line(split: Split) -> None:
     n_sym = new["symbol"].nunique()
     problems = check_continuation(prev, new.loc[new["timestamp"] != hour])
     assert problems == [
-        f"error: all {n_sym} symbols: no bar at {_fmt(hour)} UTC "
+        f"warning: all {n_sym} symbols: no bar at {_fmt(hour)} UTC "
         "(1 missing)"
     ]
 
@@ -250,8 +251,8 @@ def test_symbols_ending_early_are_reported(
     end = new["timestamp"].max()
     cut_short = new["symbol"].isin(syms) & (new["timestamp"] == end)
     assert check_continuation(prev, new.loc[~cut_short]) == [
-        f"error: {', '.join(syms)}: new ends at {_fmt(end - HOUR)} UTC, "
-        f"most symbols end at {_fmt(end)}"
+        f"warning: {', '.join(syms)}: no bar at {_fmt(end)} UTC "
+        "(1 missing)"
     ]
 
 
@@ -263,12 +264,14 @@ def test_existing_checks_pass_a_symbol_short_at_either_end(
     # missing its first or its last bar, the file-level start check
     # and the data quality gate of the audit both pass the file.
     prev, new = split
-    hour = new["timestamp"].agg(edge)
-    cut = (new["symbol"] == _sym(new)) & (new["timestamp"] == hour)
+    sym, hour = _sym(new), new["timestamp"].agg(edge)
+    cut = (new["symbol"] == sym) & (new["timestamp"] == hour)
     broken = new.loc[~cut]
     assert holdout_start_problem(prev, broken) is None
     assert audit_dataset(broken).dqs >= DQS_MIN
-    assert len(_errors(check_continuation(prev, broken))) == 1
+    assert check_continuation(prev, broken) == [
+        f"warning: {sym}: no bar at {_fmt(hour)} UTC (1 missing)"
+    ]
 
 
 def test_missing_and_extra_symbols_are_reported(split: Split) -> None:
@@ -331,7 +334,7 @@ def test_rows_without_a_key_are_reported(split: Split, key: str) -> None:
     broken.loc[row, key] = None
     assert check_continuation(prev, broken) == [
         "error: 1 rows in new have no timestamp or no symbol",
-        f"error: {sym}: no bar at {_fmt(hour)} UTC (1 missing)",
+        f"warning: {sym}: no bar at {_fmt(hour)} UTC (1 missing)",
     ]
 
 
@@ -391,11 +394,83 @@ def test_price_jump_at_the_seam_is_a_warning(split: Split) -> None:
 
 def test_errors_come_before_warnings(split: Split) -> None:
     prev, new = split
-    broken = new.loc[new["timestamp"] != _hour(new, 50)].copy()
+    broken = pd.concat([new, new.iloc[[500]]], ignore_index=True)
     broken.loc[broken["symbol"] == _sym(new), "funding_rate"] = 0.0
     problems = check_continuation(prev, broken)
     kinds = [line.split(":")[0] for line in problems]
     assert kinds == ["error", "warning"]
+
+
+def test_bars_the_builder_filled_in_are_a_warning(split: Split) -> None:
+    # The builder fills a gap of up to three hours with bars of zero
+    # volume. The file then has every hour again, and only this
+    # warning shows that two of its bars were never traded.
+    prev, new = split
+    sym = _sym(new)
+    hours = [_hour(new, 100), _hour(new, 101)]
+    gap = (new["symbol"] == sym) & new["timestamp"].isin(hours)
+    built = autoclean_market_data(new.loc[~gap])
+    assert check_continuation(prev, built) == [
+        "warning: 2 bars in new have zero volume, as when the builder "
+        f"fills a short gap: {sym} at {_fmt(hours[0])}, {_fmt(hours[1])}"
+    ]
+
+
+def test_gap_longer_than_the_builder_fills_is_a_warning(
+    split: Split,
+) -> None:
+    # Six hours: the builder fills three and drops three. No error: a
+    # gap on the exchange's side is still there after a second
+    # download, and the run goes ahead on the bars that exist.
+    prev, new = split
+    sym = _sym(new)
+    hours = [_fmt(_hour(new, 100 + i)) for i in range(6)]
+    gap = (new["symbol"] == sym) & new["timestamp"].isin(
+        [_hour(new, 100 + i) for i in range(6)]
+    )
+    built = autoclean_market_data(new.loc[~gap])
+    assert check_continuation(prev, built) == [
+        f"warning: {sym}: no bar at {', '.join(hours[3:])} UTC "
+        "(3 missing)",
+        "warning: 3 bars in new have zero volume, as when the builder "
+        f"fills a short gap: {sym} at {', '.join(hours[:3])}",
+    ]
+
+
+def test_continuation_from_the_command_line(
+    split: Split, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prev, new = split
+    prev_file, new_file = tmp_path / "prev.pq", tmp_path / "new.pq"
+    prev.tail(2 * 24 * new["symbol"].nunique()).to_parquet(prev_file)
+    new.to_parquet(new_file)
+    args = ["--continuation", str(prev_file), str(new_file)]
+    assert main(args) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"prev: {prev_file} (sha256 {file_hash(prev_file)})",
+        f"new: {new_file} (sha256 {file_hash(new_file)})",
+        "no problems",
+    ]
+    # A warning alone is exit code 0, an error 1.
+    sym, hour = _sym(new), _hour(new, 100)
+    gap_file = tmp_path / "gap.pq"
+    dropped = (new["symbol"] == sym) & (new["timestamp"] == hour)
+    new.loc[~dropped].to_parquet(gap_file)
+    assert main(args[:2] + [str(gap_file)]) == 0
+    assert capsys.readouterr().out.splitlines()[2:] == [
+        f"warning: {sym}: no bar at {_fmt(hour)} UTC (1 missing)"
+    ]
+    downloaded = str(new["timestamp"].max() + HOUR / 2)
+    assert main(args + ["--as-of", downloaded]) == 1
+    assert "had not closed at download time" in capsys.readouterr().out
+    # A file that cannot be read is exit code 2, and so is a call that
+    # mixes the check with reports.
+    assert main(args[:2] + [str(tmp_path / "gone.pq")]) == 2
+    assert capsys.readouterr().out.startswith("Could not read ")
+    for wrong in (args + ["report.txt"], ["--as-of", downloaded]):
+        with pytest.raises(SystemExit) as stop:
+            main(wrong)
+        assert stop.value.code == 2
 
 
 # --- Part 2: the audit report as a table -----------------------------
