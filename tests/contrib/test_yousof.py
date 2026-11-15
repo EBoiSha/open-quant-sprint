@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import math
 import os
 import re
@@ -21,6 +22,7 @@ from src.audit import (
     format_audit_report,
     holdout_start_problem,
     run_full_audit,
+    run_record,
 )
 from src.contrib.yousof import (
     CHECKED_VERSIONS,
@@ -31,6 +33,8 @@ from src.contrib.yousof import (
     file_hash,
     main,
     parse_audit_report,
+    read_run_log,
+    run_log_table,
     split_reports,
 )
 from src.quality import audit_dataset
@@ -1263,3 +1267,150 @@ def test_runs_as_a_module() -> None:
     )
     assert done.returncode == 0, done.stderr
     assert done.stdout == _table(_report(path.name)) + "\n"
+
+
+# --- the run log -----------------------------------------------------
+
+LOG_HEAD = [
+    "| Strategy | Verdict | Sharpe @ 5 bps | Holdout or forward | "
+    "Causality | Run (UTC) |",
+    "| --- | --- | --- | --- | --- | --- |",
+]
+LOG_SHARED = (
+    "All runs: audit version `1.3.2`, commit `abc1234`, panel "
+    "`1111111111111111`, holdout `2222222222222222`, random cuts `60`, "
+    "isolation `host process`."
+)
+
+
+def _record(**changes: object) -> dict:
+    """A record of the shape ``run_record`` in src/audit.py writes."""
+    record = {
+        "utc": "2026-11-22T10:00:00+00:00", "strategy": "a.py",
+        "audit_version": "1.3.2", "commit": "abc1234",
+        "strategy_sha256": "0" * 16, "data_sha256": "1" * 16,
+        "holdout_sha256": "2" * 16, "causality_seed": 7,
+        "n_random_cuts": 60, "isolation": "host process",
+        "verdict": "REJECT",
+        "causality": {"passed": True, "detail": "Causal invariance"},
+        "sharpe_5bps": [-1.5312, -3.0021, 0.0712],
+        "holdout_status": "ok", "holdout_detail": "bar-by-bar evaluation",
+        "holdout_sharpe": [0.3649, -4.6612, 6.0198],
+    }
+    return {**record, **changes}
+
+
+def _log(*records: dict) -> str:
+    return "".join(json.dumps(record) + "\n" for record in records)
+
+
+def test_run_log_table_keeps_the_order_of_the_file() -> None:
+    # One row per run, as they were run: the results are not a ranking,
+    # so the PASS with the higher Sharpe stays second.
+    leak = "Holdout look-ahead: one-shot weights differ"
+    text = _log(
+        _record(),
+        _record(
+            strategy="b.py", verdict="PASS", utc="2026-11-22T10:05:00+00:00",
+            sharpe_5bps=[2.8514, 0.7402, 4.9031],
+        ),
+        _record(
+            strategy="c.py", utc="2026-11-22T10:09:00+00:00",
+            causality={"passed": False, "detail": "Look-ahead leak"},
+            holdout_status="leak", holdout_detail=leak, holdout_sharpe=None,
+        ),
+    )
+    records, problems = read_run_log(text)
+    assert problems == []
+    period = "+0.36, 95% CI [-4.66, +6.02] includes 0"
+    assert run_log_table(records).splitlines() == [
+        "#### Run log: 3 runs",
+        "",
+        LOG_SHARED,
+        "",
+        *LOG_HEAD,
+        "| `a.py` | **REJECT** | -1.53, 95% CI [-3.00, +0.07] includes 0 "
+        f"| {period} | pass | `2026-11-22T10:00:00+00:00` |",
+        f"| `b.py` | PASS | +2.85, 95% CI [+0.74, +4.90] | {period} | pass "
+        "| `2026-11-22T10:05:00+00:00` |",
+        "| `c.py` | **REJECT** | -1.53, 95% CI [-3.00, +0.07] includes 0 "
+        f"| **FAIL** `leak: {leak}` | **FAIL** `Look-ahead leak` | "
+        "`2026-11-22T10:09:00+00:00` |",
+    ]
+
+
+def test_run_log_says_where_runs_differ_and_what_ran_twice() -> None:
+    # Every run of one round is on the same code and data. A run on
+    # another panel or with fewer cuts is named, and so is a strategy
+    # that ran twice.
+    records, _ = read_run_log(_log(
+        _record(),
+        _record(strategy="b.py", data_sha256="3" * 16, n_random_cuts=8),
+        _record(utc="2026-11-22T11:00:00+00:00"),
+    ))
+    table = run_log_table(records)
+    assert "panel" not in table.split("| Strategy")[0]
+    assert (
+        "Runs differ in panel: `1111111111111111` for `a.py`, `a.py`; "
+        "`3333333333333333` for `b.py`."
+    ) in table
+    assert (
+        "Runs differ in random cuts: `60` for `a.py`, `a.py`; `8` for "
+        "`b.py`."
+    ) in table
+    rows = [ln.split(" | ")[0] for ln in table.splitlines()[6:9]]
+    assert rows == [
+        "| `a.py` (run 1 of 2)", "| `b.py`", "| `a.py` (run 2 of 2)"
+    ]
+
+
+def test_run_log_line_that_is_no_record_is_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A record that lacks values shows "?", a line that is no record is
+    # named, and neither stops the table.
+    text = _log(_record()) + "not json\n[1, 2]\n" + _log(
+        {"strategy": "b.py", "sharpe_5bps": "n/a"}
+    )
+    records, problems = read_run_log(text)
+    assert problems == [
+        "line 2 is not a run record: 'not json'",
+        "line 3 is not a run record: '[1, 2]'",
+    ]
+    table = run_log_table(records, problems)
+    assert "| `b.py` | ? | ? |  | ? | `?` |" in table
+    assert table.splitlines()[-2:] == [f"- `{p}`" for p in problems]
+    # The command line prints the same and returns 1, as for a file
+    # that is not there.
+    log = tmp_path / "log.jsonl"
+    log.write_text(text, encoding="utf-8")
+    assert main(["--log", str(log)]) == 1
+    assert capsys.readouterr().out == table + "\n"
+    assert main(["--log", str(tmp_path / "gone.jsonl")]) == 1
+    assert capsys.readouterr().out.startswith("Could not read ")
+    assert run_log_table([]) == "#### Run log: 0 runs"
+
+
+def test_run_log_of_the_current_audit(
+    live_audit: tuple[dict, dict],
+) -> None:
+    # The record the audit of this checkout writes with --log, so a
+    # field that is renamed there fails here.
+    result, provenance = live_audit
+    provenance = {**provenance, "audit_version": AUDIT_VERSION}
+    record = run_record(result, provenance, "momentum.py")
+    records, problems = read_run_log(json.dumps(record) + "\n")
+    assert problems == []
+    lines = run_log_table(records).splitlines()
+    assert lines[2] == (
+        f"All runs: audit version `{AUDIT_VERSION}`, commit `abc1234`, "
+        "panel `1111111111111111`, holdout `2222222222222222`, random cuts "
+        "`8`, isolation `host process`."
+    )
+    fee, holdout = result["fee_curve"][5.0], result["holdout"]
+    cells = [cell.strip() for cell in lines[-1].split(" | ")]
+    assert cells[0] == "| `momentum.py`"
+    assert cells[1] == ("PASS" if result["passed"] else "**REJECT**")
+    assert cells[2].startswith(f"{fee.sharpe:+.2f}, 95% CI [")
+    assert cells[3].startswith(f"{holdout.sharpe:+.2f}, 95% CI [")
+    assert cells[4] == "pass" and cells[5] == f"`{record['utc']}` |"

@@ -113,12 +113,22 @@ line; and in reports before 1.3.2 nothing below an error message is
 read but that verdict, and the note says what was left out. The text
 itself goes into code spans, without backticks, line breaks or bare
 pipes, so it cannot add links or markup to the summary.
+
+The run log. ``python -m src.audit --log FILE`` appends one JSON
+record per run, and RULES.md makes that file the result of an official
+run. ``run_log_table`` prints its records as one table, in the order
+of the file and never sorted by a result, since the results are not a
+ranking. It says what all runs share (audit version, commit, data
+hashes, random cuts, isolation), where runs differ in one of these,
+and which strategy ran more than once. ``python -m src.contrib.yousof
+--log FILE`` prints it.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import re
 import sys
@@ -1041,6 +1051,161 @@ def file_hash(path: str | Path) -> str | None:
     return digest.hexdigest()[:HASH_LEN]
 
 
+# What the runs of one official round have in common, and its name in
+# the table of the run log.
+_LOG_SHARED = (
+    ("audit_version", "audit version"),
+    ("commit", "commit"),
+    ("data_sha256", "panel"),
+    ("holdout_sha256", "holdout"),
+    ("n_random_cuts", "random cuts"),
+    ("isolation", "isolation"),
+)
+
+
+def read_run_log(text: str) -> tuple[list[dict], list[str]]:
+    """The records of a ``--log`` file of the audit, in file order.
+
+    The audit appends one JSON object per run (``run_record`` in
+    ``src.audit``). A line that is not one is left out and named in
+    the second list; nothing raises.
+    """
+    records: list[dict] = []
+    problems: list[str] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            record = None
+        if isinstance(record, dict):
+            records.append(record)
+        else:
+            problems.append(
+                f"line {number} is not a run record: "
+                f"{line.strip()[:DETAIL_MAX]!r}"
+            )
+    return records, problems
+
+
+def run_log_table(
+    records: list[dict], problems: list[str] | None = None
+) -> str:
+    """The records of a run log as Markdown, one row per run.
+
+    Rows are in the order of the file, never sorted by a result: the
+    final results are not a ranking (RULES.md). Above the table is
+    what all runs share; below it, where they differ in audit version,
+    commit, data, random cuts or isolation, and the ``problems`` of
+    ``read_run_log``. A strategy that ran more than once is marked in
+    its rows.
+    """
+    out = [f"#### Run log: {len(records)} runs"]
+    shared, notes = [], []
+    for key, label in _LOG_SHARED:
+        runs: dict[str, list[str]] = {}
+        for record in records:
+            name = _code(str(record.get("strategy")))
+            runs.setdefault(str(record.get(key)), []).append(name)
+        if len(runs) > 1:
+            parts = [
+                f"{_code(value)} for {_some(names)}"
+                for value, names in runs.items()
+            ]
+            notes.append(f"Runs differ in {label}: {'; '.join(parts)}.")
+        elif "None" not in runs:
+            shared += [f"{label} {_code(value)}" for value in runs]
+    if shared:
+        out += ["", f"All runs: {', '.join(shared)}."]
+    names = [str(record.get("strategy")) for record in records]
+    if records:
+        out += [
+            "",
+            "| Strategy | Verdict | Sharpe @ 5 bps | Holdout or forward "
+            "| Causality | Run (UTC) |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+    for i, record in enumerate(records):
+        run = ""
+        if names.count(names[i]) > 1:
+            n = names[: i + 1].count(names[i])
+            run = f" (run {n} of {names.count(names[i])})"
+        out.append(_log_row(record, run))
+    if notes:
+        out += [""] + notes
+    if problems:
+        out += ["", "Log notes:", ""]
+        out += [f"- {_code(p, NOTE_MAX)}" for p in problems]
+    return "\n".join(out)
+
+
+def _log_row(record: dict, run: str) -> str:
+    """One row of ``run_log_table``; "?" for what the record lacks."""
+    verdict = record.get("verdict")
+    if verdict not in ("PASS", "REJECT"):
+        verdict = "?"
+    elif verdict == "REJECT":
+        verdict = "**REJECT**"
+    status = record.get("holdout_status")
+    if status is None:
+        period = ""  # a run without --holdout
+    elif status == "ok":
+        period = _log_sharpe(record.get("holdout_sharpe"))
+    else:
+        detail = record.get("holdout_detail") or ""
+        period = "**FAIL** " + _code(f"{status}: {detail}")
+    causality = record.get("causality")
+    passed = causality.get("passed") if isinstance(causality, dict) else None
+    if passed is True:
+        cause = "pass"
+    elif passed is False:
+        cause = f"**FAIL** {_code(str(causality.get('detail') or ''))}"
+    else:
+        cause = "?"
+    cells = [
+        _code(str(record.get("strategy") or "?")) + run,
+        verdict,
+        _log_sharpe(record.get("sharpe_5bps")),
+        period,
+        cause.strip(),
+        _code(str(record.get("utc") or "?")),
+    ]
+    return "| " + " | ".join(_cell(cell) for cell in cells) + " |"
+
+
+def _log_sharpe(value: object) -> str:
+    """A record's [Sharpe, low, high] as in the audit table, or "?"."""
+    try:
+        sharpe, low, high = (float(x) for x in value)
+    except (TypeError, ValueError):
+        return "?"
+    return _sharpe(sharpe, (low, high))
+
+
+def _some(names: list[str]) -> str:
+    """Up to MAX_EXAMPLES names and a count of the rest."""
+    more = len(names) - MAX_EXAMPLES
+    shown = ", ".join(names[:MAX_EXAMPLES])
+    return shown + (f" (+{more} more)" if more > 0 else "")
+
+
+def _print_log(path: str) -> int:
+    """Print the table of the run log at ``path``.
+
+    Returns 1 when the file or one of its lines cannot be read.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            records, problems = read_run_log(fh.read())
+    except OSError as exc:
+        reason = _code(exc.strerror or type(exc).__name__)
+        print(f"Could not read {_code(path)}: {reason}")
+        return 1
+    print(run_log_table(records, problems))
+    return 1 if problems else 0
+
+
 def _rows(s: AuditSummary) -> list[Row]:
     """(label, result, value) for each check below the verdict."""
     unread = "not read, see below"
@@ -1162,6 +1327,8 @@ def main(argv: list[str] | None = None) -> int:
 
     Prints a Markdown table for each audit report in the REPORT files,
     or on stdin without any, e.g. into ``$GITHUB_STEP_SUMMARY``.
+    With ``--log FILE`` it prints the table of that run log instead
+    (``run_log_table``) and returns 1 if a line of it cannot be read.
     ``--data`` and ``--holdout`` name the files the audit ran on; see
     ``audit_table``. Returns 1 when a file cannot be read, else 0,
     whatever the verdict.
@@ -1171,10 +1338,16 @@ def main(argv: list[str] | None = None) -> int:
         description="Markdown tables of python -m src.audit reports.",
     )
     parser.add_argument("reports", nargs="*", metavar="REPORT")
+    parser.add_argument(
+        "--log", metavar="FILE",
+        help="print the table of a --log file of the audit; no REPORT",
+    )
     parser.add_argument("--data", help="the --data panel of the runs")
     parser.add_argument("--holdout", help="the --holdout file of the runs")
     args = parser.parse_args(argv)
     paths = args.reports
+    if args.log:
+        return _print_log(args.log)
     texts: list[tuple[str | None, str]] = []
     blocks: list[str] = []
     status = 0
