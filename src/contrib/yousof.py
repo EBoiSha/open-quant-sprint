@@ -89,6 +89,10 @@ disagree, PASS with a failed row or REJECT without one, a note under
 the table says so: the audit then gates on something the table does
 not show, or its format changed. Data quality gets a row only below
 the audit's gate; on the official panel it is the same for everyone.
+The lag test has a second rule: with a 1-bar Sharpe at or below 0 it
+passes if the 2-bar Sharpe is no more than 0.5 lower. The row states
+that rule then, since "pass" next to a negative Sharpe is easy to
+misread.
 
 Which data. With many data files, a reviewer needs to know which one a
 run used, above all when it failed. The report prints the first 16 hex
@@ -501,6 +505,7 @@ def _funding_warnings(on_grid: pd.DataFrame) -> list[str]:
 CHECKED_VERSIONS = ("1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.3.1", "1.3.2")
 ONE_LINE_ERRORS = (1, 3, 2)  # audit version that prints errors on one line
 TURNOVER_MIN = 1e-5  # the audit's turnover gate at 5 bps
+LAG_SLACK = 0.5  # the audit's lag rule for a 1-bar Sharpe not above 0
 DETAIL_MAX = 160  # characters of free text shown in the table
 NOTE_MAX = 400  # characters of a parser note below it
 HASH_LEN = 16  # hex digits of a file's SHA-256 that the audit prints
@@ -1064,6 +1069,13 @@ def _rows(s: AuditSummary) -> list[Row]:
         lag = f"2-bar lag Sharpe {s.lag2_sharpe:+.2f}"
         if s.lag1_sharpe is not None:
             lag += f", 1-bar {s.lag1_sharpe:+.2f}"
+        if _above(s.lag1_sharpe, 0.0, 0.01) is False:
+            # evaluate_lag_sensitivity in src/audit.py; a 1-bar Sharpe
+            # printed as +0.00 does not say which rule applied.
+            lag += (
+                "; with a 1-bar Sharpe at or below 0 the test passes if "
+                f"the 2-bar Sharpe is no more than {LAG_SLACK:g} lower"
+            )
     null = unread
     if s.null_mean is not None:
         null = f"mean Sharpe {s.null_mean:+.2f}"

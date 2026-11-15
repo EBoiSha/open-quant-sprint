@@ -914,6 +914,29 @@ def test_verdict_and_rows_that_disagree_get_a_note() -> None:
     ) in _table(rejected)
 
 
+def test_lag_row_states_the_rule_for_a_sharpe_not_above_zero() -> None:
+    # "pass" next to -1.53 is the audit's rule, not a slip: with a 1-bar
+    # Sharpe at or below 0, the 2-bar Sharpe may be up to 0.5 lower.
+    rule = (
+        "; with a 1-bar Sharpe at or below 0 the test passes if the 2-bar "
+        "Sharpe is no more than 0.5 lower"
+    )
+    rows = _rows(_table(_report("baseline_flow_v1.3.2.txt")))
+    assert rows["Lag test"] == [
+        "pass", "2-bar lag Sharpe -1.53, 1-bar -1.53" + rule
+    ]
+    rows = _rows(_table(_report("leaky_example_v1.3.1.txt")))
+    assert rows["Lag test"] == [
+        "**FAIL**", "2-bar lag Sharpe -10.33, 1-bar -9.21" + rule
+    ]
+    # Above 0 the rule is the plain one (2-bar Sharpe above 0), and a
+    # 1-bar Sharpe printed as +0.00 does not say which rule applied.
+    rows = _rows(_table(_report(PASS_REPORT)))
+    assert rows["Lag test"] == ["pass", "2-bar lag Sharpe +1.64, 1-bar +1.45"]
+    rows = _rows(_table(_report("forging_example_v1.3.2.txt")))
+    assert rows["Lag test"][1] == "2-bar lag Sharpe +0.00, 1-bar +0.00"
+
+
 def test_data_quality_gets_a_row_only_below_the_gate() -> None:
     assert "Data quality" not in _rows(_table(_report(PASS_REPORT)))
     # A REJECT for the data alone: the row says why, so no note.
