@@ -14,7 +14,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.audit import _sha256, holdout_start_problem
+from data.build_dataset import generate_calibrated_panel
+from src.audit import (
+    AUDIT_VERSION,
+    _sha256,
+    format_audit_report,
+    holdout_start_problem,
+    run_full_audit,
+)
 from src.contrib.yousof import (
     CHECKED_VERSIONS,
     DQS_MIN,
@@ -1108,6 +1115,94 @@ def test_live_audit_that_stops_names_its_data(
         "",
         f"- `no audit report in the text, which starts with {error!r}`",
     ]
+
+
+def _momentum(df: pd.DataFrame) -> pd.Series:
+    """Cross-sectional 24 h momentum: causal, and it trades."""
+    past = df.groupby("symbol")["close"].pct_change(24).fillna(0.0)
+    return past - past.groupby(df["timestamp"]).transform("mean")
+
+
+@pytest.fixture(scope="module")
+def live_audit() -> tuple[dict, dict]:
+    """Result and provenance of the audit of this checkout.
+
+    In-process, on a small synthetic panel whose last two days are the
+    holdout, with every seed fixed: nothing is read from disk and no
+    process is started, so it is the same on every machine.
+    """
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+               "ADAUSDT")
+    panel = generate_calibrated_panel(symbols=symbols, n_hours=720, seed=7)
+    cut = panel["timestamp"].max() - 47 * HOUR
+    result = run_full_audit(
+        panel.loc[panel["timestamp"] < cut].reset_index(drop=True),
+        _momentum,
+        holdout_df=panel.loc[panel["timestamp"] >= cut],
+        causality_seed=7,
+    )
+    provenance = {
+        "commit": "abc1234", "strategy_sha256": "0" * 16,
+        "data_sha256": "1" * 16, "holdout_sha256": "2" * 16,
+        "causality_seed": 7, "n_random_cuts": 8,
+        "isolation": "host process",
+    }
+    return result, provenance
+
+
+def test_report_of_the_current_audit_is_read_back(
+    live_audit: tuple[dict, dict],
+) -> None:
+    # The saved reports are snapshots. This is the report the audit of
+    # this checkout prints: every value the parser reads from it has to
+    # be the value the audit printed, so a report line that changes
+    # fails here instead of showing as "?" in the CI tables.
+    result, provenance = live_audit
+    assert result["holdout_eval"]["status"] == "ok"
+    report = format_audit_report(result, "momentum.py", provenance)
+    summary = parse_audit_report(report + "\n")
+
+    def printed(value: float, digits: int = 2) -> float:
+        return float(f"{value:.{digits}f}")
+
+    def interval(metrics: object) -> tuple[float, float]:
+        low, high = metrics.sharpe_ci_low, metrics.sharpe_ci_high
+        if math.isnan(low):
+            return (math.nan, math.nan)
+        return (printed(low), printed(high))
+
+    fee, oos = result["fee_curve"][5.0], result["split"]["OOS"]
+    holdout = result["holdout"]
+    lag, null = result["lag_sensitivity"], result["shuffled_null"]
+    wick = result["wick_integrity"]
+    assert fee.mean_turnover > 0.01  # the strategy trades
+    expected = dict(
+        strategy="momentum.py", version=AUDIT_VERSION, commit="abc1234",
+        strategy_sha256="0" * 16, data_sha256="1" * 16,
+        holdout_sha256="2" * 16,
+        verdict="PASS" if result["passed"] else "REJECT",
+        causality_passed=result["causality"]["passed"],
+        causality_detail=result["causality"]["detail"],
+        dqs=result["data_quality"].dqs,
+        sharpe_5bps=printed(fee.sharpe), sharpe_5bps_ci=interval(fee),
+        turnover_5bps=printed(fee.mean_turnover, 4),
+        oos_sharpe=printed(oos.sharpe), oos_sharpe_ci=interval(oos),
+        lag1_sharpe=printed(lag["sr_lag1"]),
+        lag2_sharpe=printed(lag["sr_lag2"]), lag_passed=lag["passed"],
+        null_mean=printed(null["null_sharpe"]),
+        null_sd=printed(null["null_sd"]), null_passed=null["passed"],
+        wick_share_pct=printed(wick["wick_pnl_share"] * 100, 1),
+        wick_passed=wick["passed"], holdout_passed=True,
+        holdout_sharpe=printed(holdout.sharpe),
+        holdout_sharpe_ci=interval(holdout),
+        holdout_detail="bar-by-bar evaluation",
+    )
+    read = summary.as_dict()
+    # A new audit version is named by the parser until it is added to
+    # CHECKED_VERSIONS; that note is about the version, not the format.
+    notes = [p for p in read.pop("problems") if "checked against" not in p]
+    assert notes == []
+    assert _plain(read) == _plain({**read, **expected})
 
 
 def test_command_line_with_data_files(
