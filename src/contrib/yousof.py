@@ -19,7 +19,8 @@ Missing hours are warnings. A gap on the exchange's side is still
 there after a second download, and the run then goes ahead on the bars
 that exist, with the gap listed in the report. So an hour without a
 bar is a warning that names the symbol and the hours, wherever it is:
-at the start of a symbol, in between or at its end. The builder fills
+at the start of a symbol, in between or at its end. Every missing
+hour is named, hours in a row as one period. The builder fills
 a gap of up to three hours with bars of zero volume and drops the
 hours after that, so such bars are named as well. One case stays an
 error: a file that starts late as a whole, because the audit stops on
@@ -206,6 +207,23 @@ def _hours(stamps: pd.Series | pd.DatetimeIndex) -> str:
     return shown + (f" (+{more} more)" if more > 0 else "")
 
 
+def _periods(stamps: pd.DatetimeIndex) -> str:
+    """Every hour of ``stamps``, hours in a row as "from A to B".
+
+    Not cut like ``_hours``: the report of a run lists a gap in full.
+    """
+    runs: list[list[pd.Timestamp]] = []
+    for ts in pd.DatetimeIndex(stamps).unique().sort_values():
+        if runs and ts - runs[-1][1] == HOUR:
+            runs[-1][1] = ts
+        else:
+            runs.append([ts, ts])
+    return ", ".join(
+        f"at {_fmt(a)}" if a == b else f"from {_fmt(a)} to {_fmt(b)}"
+        for a, b in runs
+    )
+
+
 def _by_symbol(rows: pd.DataFrame) -> str:
     """The hours of ``rows``, for up to MAX_EXAMPLES symbols."""
     parts = [
@@ -388,7 +406,7 @@ def _seam_problems(
         grid = pd.date_range(first, common_end, freq="h")
         gaps = grid.difference(pd.DatetimeIndex(stamps.get_group(sym)))
         if not gaps.empty:
-            msg = f"no bar at {_hours(gaps)} UTC ({len(gaps)} missing)"
+            msg = f"no bar {_periods(gaps)} UTC ({len(gaps)} missing)"
             lacking.setdefault(msg, []).append(sym)
 
     def lines(found: dict[str, list[str]]) -> list[str]:

@@ -430,10 +430,24 @@ def test_gap_longer_than_the_builder_fills_is_a_warning(
     )
     built = autoclean_market_data(new.loc[~gap])
     assert check_continuation(prev, built) == [
-        f"warning: {sym}: no bar at {', '.join(hours[3:])} UTC "
+        f"warning: {sym}: no bar from {hours[3]} to {hours[5]} UTC "
         "(3 missing)",
         "warning: 3 bars in new have zero volume, as when the builder "
         f"fills a short gap: {sym} at {', '.join(hours[:3])}",
+    ]
+
+
+def test_every_missing_hour_is_named_as_periods(split: Split) -> None:
+    # Eight hours in a row, then one alone. The report of a run lists
+    # the gap, so no hour is left out of the line, and hours in a
+    # row are one period.
+    prev, new = split
+    sym = _sym(new)
+    hours = [_hour(new, 100 + i) for i in range(8)] + [_hour(new, 120)]
+    gap = (new["symbol"] == sym) & new["timestamp"].isin(hours)
+    assert check_continuation(prev, new.loc[~gap]) == [
+        f"warning: {sym}: no bar from {_fmt(hours[0])} to "
+        f"{_fmt(hours[7])}, at {_fmt(hours[8])} UTC (9 missing)"
     ]
 
 
